@@ -1,0 +1,27 @@
+rules:
+  - when:
+      drift_level: [medium, high]
+      drift_type: contradiction
+    action: open_investigation
+
+  - when:
+      drift_level: [medium, high]
+      drift_type: goal
+    action: request_goal_refresh
+
+  - when:
+      drift_level: [high]
+      drift_type: factual
+    action: request_source_refresh
+
+  - when:
+      drift_level: [high]
+      drift_type: entropy
+    action: halt_and_review
+
+transition_rules:
+  - from: DriftChecked
+    to: ContextIngested
+    block_when:
+      drift_level: [high]
+    reason: "High drift blocks cycle reset until planner acts"

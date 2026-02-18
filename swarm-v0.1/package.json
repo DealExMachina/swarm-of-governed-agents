@@ -1,0 +1,29 @@
+{
+  "name": "swarm-v0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --loader ts-node/esm src/orchestrator.ts",
+    "swarm": "node --loader ts-node/esm src/swarm.ts",
+    "swarm:all": "bash scripts/swarm-all.sh",
+    "build": "tsc",
+    "start": "node dist/swarm.js",
+    "autoscale": "node dist/autoscaler.js",
+    "loadgen": "node dist/loadgen.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.744.0",
+    "dotenv": "^16.4.5",
+    "nats": "^2.29.3",
+    "pg": "^8.13.0",
+    "yaml": "^2.8.2"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.0.0"
+  }
+}
