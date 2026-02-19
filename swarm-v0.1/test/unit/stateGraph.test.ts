@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { join } from "path";
 import {
   nextState,
   transitions,
@@ -9,6 +10,7 @@ import {
   type GraphState,
   type Node,
 } from "../../src/stateGraph";
+import { loadPolicies } from "../../src/governance";
 
 const baseState: GraphState = {
   runId: "test-run",
@@ -151,9 +153,10 @@ describe("stateGraph (Postgres-backed)", () => {
       expect(eventInsert).toBeDefined();
       const eventData = JSON.parse(eventInsert!.values[0]);
       expect(eventData.type).toBe("state_transition");
-      expect(eventData.from).toBe("ContextIngested");
-      expect(eventData.to).toBe("FactsExtracted");
-      expect(eventData.epoch).toBe(4);
+      expect(eventData.payload).toBeDefined();
+      expect(eventData.payload.from).toBe("ContextIngested");
+      expect(eventData.payload.to).toBe("FactsExtracted");
+      expect(eventData.payload.epoch).toBe(4);
     });
   });
 
@@ -176,6 +179,30 @@ describe("stateGraph (Postgres-backed)", () => {
       const insert = calls.find((c) => c.text.includes("INSERT INTO swarm_state"));
       expect(insert).toBeDefined();
       expect(insert!.text).toContain("ON CONFLICT (id) DO NOTHING");
+    });
+  });
+
+  describe("advanceState with governance", () => {
+    it("returns null and does not UPDATE when canTransition blocks (high drift)", async () => {
+      const govPath = join(process.cwd(), "governance.yaml");
+      const governance = loadPolicies(govPath);
+      const drift = { level: "high", types: [] as string[] };
+
+      const { pool, calls } = mockPool((text) => {
+        if (text.includes("SELECT") && text.includes("swarm_state")) {
+          return {
+            rowCount: 1,
+            rows: [{ run_id: "r1", last_node: "DriftChecked", epoch: "5", updated_at: new Date() }],
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      });
+
+      const result = await advanceState(5, { drift, governance }, pool);
+      expect(result).toBeNull();
+
+      const updateCalls = calls.filter((c) => c.text.includes("UPDATE") && c.text.includes("swarm_state"));
+      expect(updateCalls).toHaveLength(0);
     });
   });
 });

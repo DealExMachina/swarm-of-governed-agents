@@ -1,3 +1,5 @@
+import { trace } from "@opentelemetry/api";
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 const LEVEL_RANK: Record<LogLevel, number> = {
@@ -31,11 +33,14 @@ export interface LogEntry {
 
 function emit(level: LogLevel, msg: string, extra?: Record<string, unknown>): void {
   if (!shouldLog(level)) return;
+  const ctx = trace.getActiveSpan()?.spanContext();
   const entry: LogEntry = {
     ts: new Date().toISOString(),
     level,
     msg,
     ..._context,
+    ...(ctx?.traceId && { trace_id: ctx.traceId }),
+    ...(ctx?.spanId && { span_id: ctx.spanId }),
     ...extra,
   };
   const line = JSON.stringify(entry);

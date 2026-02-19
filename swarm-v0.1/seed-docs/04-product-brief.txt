@@ -1,0 +1,19 @@
+NEXUS — PRODUCT BRIEF (INTERNAL)
+
+Overview
+Nexus is Acme's integrated platform for compliance and workflow automation in regulated industries (financial services, healthcare, public sector). It combines document ingestion, policy checks, and audit trails in a single tenant-deployable stack.
+
+Claims
+- Reduces manual review time by an estimated 40% in pilot customers.
+- Supports SOC 2, GDPR, and sector-specific frameworks via configurable rule sets.
+- First release focused on EMEA; APAC and Americas in roadmap.
+
+Risks and limitations
+- Dependency on third-party identity providers; outage or change in API can impact availability.
+- Assumption: regulators do not introduce new certification requirements before our next release cycle (H1 2025).
+
+Goals for the product
+- Achieve 50 production deployments by end of 2025.
+- Add at least one new vertical (e.g. energy or telecom) in 2025.
+
+Owner: Product Lead. Last updated: October 2024.

@@ -89,3 +89,51 @@ export async function eventsSince(
     data: typeof r.data === "string" ? JSON.parse(r.data) : r.data,
   }));
 }
+
+/** Event types that represent pipeline progress (new content/state). Used so governance rejections do not retrigger facts. */
+const PIPELINE_EVENT_TYPES = [
+  "bootstrap",
+  "state_transition",
+  "facts_extracted",
+  "drift_analyzed",
+  "actions_planned",
+  "status_summarized",
+];
+
+/**
+ * Event types that represent new context for the facts agent. Facts run only when one of these
+ * appears in the WAL, so the loop suspends after a full cycle until new docs or bootstrap.
+ */
+const PIPELINE_EVENT_TYPES_FOR_FACTS = ["bootstrap", "context_doc"];
+
+/**
+ * Returns the latest WAL seq among events that represent pipeline progress (not governance decisions).
+ * Prevents proposal_rejected from retriggering the facts agent and causing a proposal loop.
+ */
+export async function getLatestPipelineWalSeq(pool?: pg.Pool): Promise<number> {
+  const p = pool ?? getPool();
+  await ensureContextTable(p);
+  const placeholders = PIPELINE_EVENT_TYPES.map((_, i) => `$${i + 1}`).join(", ");
+  const res = await p.query(
+    `SELECT seq FROM context_events WHERE data->>'type' IN (${placeholders}) ORDER BY seq DESC LIMIT 1`,
+    PIPELINE_EVENT_TYPES,
+  );
+  if (!res.rowCount || !res.rows[0]) return 0;
+  return parseInt(res.rows[0].seq, 10);
+}
+
+/**
+ * Latest WAL seq for facts agent only: only bootstrap and context_doc. Ensures the pipeline
+ * runs when new context is added and suspends after a full cycle (no re-trigger on state_transition).
+ */
+export async function getLatestPipelineWalSeqForFacts(pool?: pg.Pool): Promise<number> {
+  const p = pool ?? getPool();
+  await ensureContextTable(p);
+  const placeholders = PIPELINE_EVENT_TYPES_FOR_FACTS.map((_, i) => `$${i + 1}`).join(", ");
+  const res = await p.query(
+    `SELECT seq FROM context_events WHERE data->>'type' IN (${placeholders}) ORDER BY seq DESC LIMIT 1`,
+    PIPELINE_EVENT_TYPES_FOR_FACTS,
+  );
+  if (!res.rowCount || !res.rows[0]) return 0;
+  return parseInt(res.rows[0].seq, 10);
+}

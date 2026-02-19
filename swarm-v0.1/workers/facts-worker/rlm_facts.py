@@ -100,6 +100,7 @@ class Drift(BaseModel):
     types: List[str]
     notes: List[str]
     facts_hash: str
+    references: List[Dict[str, Any]] = Field(default_factory=list, description="Sources and references (doc, excerpt, type)")
 
 
 # -----------------------------
@@ -127,16 +128,52 @@ def stable_hash(obj: Any) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
-def compute_drift(new: Facts, old: Optional[Dict[str, Any]]) -> Drift:
+def _doc_titles_from_context(context: List[Dict[str, Any]]) -> List[str]:
+    """Extract unique document titles/filenames from context events (e.g. context_doc)."""
+    seen: set = set()
+    out: List[str] = []
+    for ev in context:
+        if not isinstance(ev, dict):
+            continue
+        payload = ev.get("payload") or ev.get("data", {}).get("payload") or ev.get("data") or {}
+        if isinstance(payload, dict):
+            title = payload.get("title") or payload.get("filename") or payload.get("source")
+            if title and isinstance(title, str) and title not in seen:
+                seen.add(title)
+                out.append(title)
+        # Also support top-level title/filename on event
+        for key in ("title", "filename"):
+            v = ev.get(key)
+            if v and isinstance(v, str) and v not in seen:
+                seen.add(v)
+                out.append(v)
+    return out
+
+
+def compute_drift(
+    new: Facts,
+    old: Optional[Dict[str, Any]],
+    context: Optional[List[Dict[str, Any]]] = None,
+) -> Drift:
     if not old:
+        refs: List[Dict[str, Any]] = []
+        if context:
+            for doc in _doc_titles_from_context(context):
+                refs.append({"type": "context_doc", "doc": doc})
         return Drift(
             level="none",
             types=[],
             notes=["initial snapshot"],
             facts_hash=new.hash or "",
+            references=refs,
         )
 
     drift_types: List[str] = []
+    references: List[Dict[str, Any]] = []
+
+    if context:
+        for doc in _doc_titles_from_context(context):
+            references.append({"type": "context_doc", "doc": doc})
 
     if set(new.claims) != set(old.get("claims") or []):
         drift_types.append("factual")
@@ -146,6 +183,9 @@ def compute_drift(new: Facts, old: Optional[Dict[str, Any]]) -> Drift:
 
     if new.contradictions:
         drift_types.append("contradiction")
+        for c in new.contradictions:
+            if isinstance(c, str) and c.strip():
+                references.append({"type": "contradiction", "excerpt": c.strip()})
 
     if new.confidence < (old.get("confidence") or 1.0):
         drift_types.append("entropy")
@@ -161,6 +201,7 @@ def compute_drift(new: Facts, old: Optional[Dict[str, Any]]) -> Drift:
         types=drift_types,
         notes=["automatic structured drift detection"],
         facts_hash=new.hash or "",
+        references=references,
     )
 
 
@@ -198,6 +239,6 @@ def extract_facts_and_drift(
     facts.updated_at = datetime.utcnow().isoformat() + "Z"
     facts.hash = stable_hash(facts.model_dump())
 
-    drift = compute_drift(facts, previous_facts)
+    drift = compute_drift(facts, previous_facts, context)
 
     return facts.model_dump(), drift.model_dump()

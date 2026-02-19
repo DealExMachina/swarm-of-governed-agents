@@ -3,22 +3,32 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --loader ts-node/esm src/orchestrator.ts",
     "swarm": "node --loader ts-node/esm src/swarm.ts",
     "swarm:all": "bash scripts/swarm-all.sh",
     "build": "tsc",
     "start": "node dist/swarm.js",
-    "autoscale": "node dist/autoscaler.js",
     "loadgen": "node dist/loadgen.js",
+    "seed": "node --loader ts-node/esm scripts/seed-context.ts",
+    "seed:all": "node --loader ts-node/esm scripts/seed-all.ts",
+    "check:model": "node --loader ts-node/esm scripts/check-model-reachable.ts",
+    "observe": "node --loader ts-node/esm scripts/observer.ts",
+    "feed": "node --loader ts-node/esm src/feed.ts",
+    "ensure-stream": "node --loader ts-node/esm scripts/ensure-stream.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.744.0",
+    "@aws-sdk/client-s3": "^3.993.0",
+    "@mastra/core": "^0.24.9",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.212.0",
+    "@opentelemetry/instrumentation-http": "^0.212.0",
+    "@opentelemetry/sdk-node": "^0.212.0",
     "dotenv": "^16.4.5",
     "nats": "^2.29.3",
     "pg": "^8.13.0",
-    "yaml": "^2.8.2"
+    "yaml": "^2.8.2",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/pg": "^8.11.0",

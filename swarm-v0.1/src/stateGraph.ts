@@ -1,5 +1,6 @@
 import pg from "pg";
 import { appendEvent } from "./contextWal.js";
+import { createSwarmEvent } from "./events.js";
 import { canTransition, type DriftInput, type GovernanceConfig } from "./governance.js";
 
 const { Pool } = pg;
@@ -156,13 +157,15 @@ export async function advanceState(
   };
 
   try {
-    await appendEvent({
-      type: "state_transition",
-      from: current.lastNode,
-      to: newState.lastNode,
-      epoch: newState.epoch,
-      run_id: newState.runId,
-    }, p);
+    await appendEvent(
+      createSwarmEvent("state_transition", {
+        from: current.lastNode,
+        to: newState.lastNode,
+        epoch: newState.epoch,
+        run_id: newState.runId,
+      }, { source: "state_graph" }),
+      p,
+    );
   } catch {
     // Non-fatal: transition succeeded even if event emission fails
   }

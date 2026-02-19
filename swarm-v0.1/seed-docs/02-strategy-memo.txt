@@ -1,0 +1,22 @@
+INTERNAL MEMO — STRATEGY & RISK COMMITTEE
+
+To: Leadership team
+From: Strategy Office
+Re: Q4 priorities and risk register update
+Date: 2024-10-15
+
+Summary
+
+We are aligning Q4 execution around three priorities: (1) complete the Nexus rollout in APAC, (2) pass the upcoming SOC 2 audit, and (3) hit the engineering hiring target without diluting quality.
+
+Assumptions we are making:
+- Current pipeline will convert at or above Q3 rates.
+- No major change in regulatory requirements in our core markets before year-end.
+- Key vendors (hosting, identity) maintain SLAs.
+
+Risks and mitigations:
+- Risk: Talent market remains tight; we may miss the 20-engineer target. Mitigation: broaden geography and consider contract-to-hire.
+- Risk: SOC 2 findings could delay enterprise deals. Mitigation: pre-audit remediation completed; one open item on access recertification.
+- Risk: Contradiction between "growth first" and "cost discipline" in internal comms has caused confusion. Mitigation: single narrative in next all-hands.
+
+Goals for the cycle: close at least two enterprise logos in regulated sectors, achieve SOC 2 certification, and onboard 15+ engineers by Dec 31.

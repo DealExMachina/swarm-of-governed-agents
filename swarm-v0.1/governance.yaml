@@ -1,3 +1,6 @@
+# Approval mode: YOLO | MITL | MASTER
+mode: YOLO
+
 rules:
   - when:
       drift_level: [medium, high]

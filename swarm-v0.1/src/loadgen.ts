@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { makeEventBus } from "./eventBus.js";
+import { toErrorString } from "./errors.js";
 import { logger } from "./logger.js";
 
 const NATS_STREAM = process.env.NATS_STREAM ?? "SWARM_JOBS";
@@ -28,6 +29,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  logger.error("fatal", { error: String(e) });
+  logger.error("fatal", { error: toErrorString(e) });
   process.exit(1);
 });

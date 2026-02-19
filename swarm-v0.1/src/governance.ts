@@ -18,7 +18,10 @@ export interface TransitionRule {
   reason: string;
 }
 
+export type ApprovalMode = "YOLO" | "MITL" | "MASTER";
+
 export interface GovernanceConfig {
+  mode?: ApprovalMode;
   rules: PolicyRule[];
   transition_rules?: TransitionRule[];
 }

@@ -1,4 +1,4 @@
-import { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand, ListObjectsV2Command, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { Readable } from "stream";
 
 function streamToString(stream: any): Promise<string> {
@@ -47,24 +47,7 @@ export async function s3PutJson(s3: S3Client, bucket: string, key: string, data:
   );
 }
 
-export async function s3AppendJsonl(s3: S3Client, bucket: string, key: string, obj: any) {
-  const prev = (await s3GetText(s3, bucket, key)) ?? "";
-  const next = prev + JSON.stringify(obj) + "\n";
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      Body: next,
-      ContentType: "application/x-ndjson",
-    })
-  );
-}
-
 export async function s3ListKeys(s3: S3Client, bucket: string, prefix: string, maxKeys: number = 1000): Promise<string[]> {
   const res = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, MaxKeys: maxKeys }));
   return (res.Contents ?? []).map((c) => c.Key!).filter(Boolean);
-}
-
-export async function s3Delete(s3: S3Client, bucket: string, key: string): Promise<void> {
-  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 }

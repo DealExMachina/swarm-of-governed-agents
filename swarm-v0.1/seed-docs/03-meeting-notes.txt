@@ -1,0 +1,15 @@
+MEETING NOTES — PRODUCT & ENGINEERING SYNC
+
+Attendees: J. Walsh (CEO), M. Webb (CFO), Eng VP, Product Lead
+Date: 2024-10-22
+
+Nexus rollout
+- APAC launch delayed by 2–3 weeks due to localisation and compliance review. New target: mid-November. No change to revenue assumptions for the year; Q4 upside may shift to Q1.
+
+Hiring
+- 8 offers out; 3 accepted. Goal of 20 by year-end is still stated but internally we are tracking to 15 as the realistic stretch. Engineering will prioritise security and compliance roles first.
+
+Audit
+- SOC 2 audit scheduled for week of Nov 11. Access recertification completed. No other blockers reported.
+
+Action: Align external messaging (earnings, press) with "15+ hires" to avoid contradiction with earlier "20 engineers" commitment. Internal goal remains 20; we will report progress transparently.

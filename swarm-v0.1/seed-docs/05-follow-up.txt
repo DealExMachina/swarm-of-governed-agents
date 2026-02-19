@@ -1,0 +1,16 @@
+FOLLOW-UP — BOARD BRIEFING PACK (EXCERPT)
+
+Prepared for the November board meeting.
+
+Revenue and outlook
+- Q3 revenue $2.1M (15% YoY). Full-year guidance unchanged at $8.5M–$9.0M.
+- We have revised our hiring target from 20 to 15 engineers for Q4 to reflect market conditions and prioritisation. This is a refinement, not a strategic pivot; we will revisit capacity in Q1.
+
+Contradiction resolution
+- Earlier external messaging ("20 engineers") and internal stretch goal are now aligned: we communicate "15+ hires" externally and track 20 as an internal stretch. No retraction issued; next earnings call will use the updated figure.
+
+Risks highlighted for the board
+- Regulatory: one open item on access recertification ahead of SOC 2; expected to close before audit.
+- Execution: APAC Nexus delay may shift some Q4 revenue into Q1; overall year unchanged.
+
+No new assumptions or goals beyond those already in the strategy memo and product brief.

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import type { S3Client } from "@aws-sdk/client-s3";
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { Readable } from "stream";
-import { s3PutJson, s3GetText, s3AppendJsonl } from "../../src/s3";
+import { s3PutJson, s3GetText } from "../../src/s3";
 
 function createMockS3(sendFn: (input: unknown) => Promise<unknown>): S3Client {
   return { send: vi.fn(sendFn) } as unknown as S3Client;
@@ -61,39 +61,4 @@ describe("s3", () => {
     });
   });
 
-  describe("s3AppendJsonl", () => {
-    it("writes single line when key does not exist", async () => {
-      let putBody: string | undefined;
-      const mock = createMockS3(async (input: any) => {
-        if (input instanceof HeadObjectCommand) throw new Error("NotFound");
-        if (input instanceof PutObjectCommand) {
-          putBody = (input as any).input?.Body ?? (input as any).input?.Body;
-          if (typeof putBody !== "string") putBody = undefined;
-        }
-        return {};
-      });
-
-      await s3AppendJsonl(mock, bucket, key, { a: 1 });
-
-      expect(putBody).toBe(JSON.stringify({ a: 1 }) + "\n");
-    });
-
-    it("appends line to existing content", async () => {
-      const existing = JSON.stringify({ x: 1 }) + "\n";
-      let putBody: string | undefined;
-      const mock = createMockS3(async (input: any) => {
-        if (input instanceof HeadObjectCommand) return {};
-        if (input instanceof GetObjectCommand) return { Body: Readable.from([Buffer.from(existing, "utf-8")]) };
-        if (input instanceof PutObjectCommand) {
-          const params = (input as any).input;
-          if (params?.Body) putBody = params.Body as string;
-        }
-        return {};
-      });
-
-      await s3AppendJsonl(mock, bucket, key, { b: 2 });
-
-      expect(putBody).toBe(existing + JSON.stringify({ b: 2 }) + "\n");
-    });
-  });
 });
