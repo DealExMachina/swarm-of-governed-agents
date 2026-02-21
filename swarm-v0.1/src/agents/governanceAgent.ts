@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { setMaxListeners } from "events";
 import { join } from "path";
 import type { S3Client } from "@aws-sdk/client-s3";
 import { createTool } from "@mastra/core/tools";
@@ -13,9 +14,31 @@ import { addPending } from "../mitlServer.js";
 import type { EventBus } from "../eventBus.js";
 import { logger, setLogContext } from "../logger.js";
 import { recordProposal, recordPolicyViolation } from "../metrics.js";
-import { getChatModelConfig } from "../modelConfig.js";
+import { getChatModelConfig, getOversightModelConfig } from "../modelConfig.js";
 import type { Proposal, Action } from "../events.js";
 import { makeReadGovernanceRulesTool } from "./sharedTools.js";
+
+/** Result of deterministic governance evaluation (no side effects). */
+export interface DeterministicResult {
+  outcome: "approve" | "reject" | "pending" | "ignore";
+  reason: string;
+  actionPayload?: { expectedEpoch: number; runId: string; from: string; to: string };
+}
+
+/**
+ * Audit path: which governance path produced the decision. Recorded in context_events for E2E and audits.
+ * - processProposal: direct deterministic (MASTER/MITL or YOLO with no LLM)
+ * - oversight_acceptDeterministic: YOLO + oversight chose to accept deterministic result
+ * - oversight_escalateToLLM: YOLO + oversight chose full LLM (decision then comes from processProposalWithAgent)
+ * - oversight_escalateToHuman: YOLO + oversight chose MITL
+ * - processProposalWithAgent: full governance LLM decided (approve/reject)
+ */
+export type GovernancePath =
+  | "processProposal"
+  | "oversight_acceptDeterministic"
+  | "oversight_escalateToLLM"
+  | "oversight_escalateToHuman"
+  | "processProposalWithAgent";
 import { evaluateFinality } from "../finalityEvaluator.js";
 import { submitFinalityReviewForScope } from "../hitlFinalityRequest.js";
 
@@ -40,6 +63,114 @@ Use readState to see current state and epoch. Use readDrift to see drift level a
 Use checkTransition to see if the proposed transition is allowed given drift (e.g. high drift may block). Use checkPolicy to verify the proposing agent is allowed to write to the target node.
 You must reject if checkTransition or checkPolicy fails. If all checks pass, call publishApproval with a brief reason; otherwise call publishRejection with the reason.
 Call exactly one of: publishApproval(reason) or publishRejection(reason). End with a one-sentence rationale.`;
+
+const OVERSIGHT_AGENT_INSTRUCTIONS = `You are the oversight agent. You have a proposal and the result of a deterministic governance check (outcome and reason).
+You must choose exactly one option:
+1. acceptDeterministic - Accept the deterministic result as-is (approve, reject, or pending will be applied accordingly).
+2. escalateToLLM - Send to the full governance LLM for richer reasoning before a final decision.
+3. escalateToHuman - Send to human-in-the-loop (MITL) for manual approval.
+Call exactly one of these three tools. Do not invent or override the deterministic outcome; you only route to one of the three paths.`;
+
+function createOversightTools(
+  proposal: Proposal,
+  deterministicResult: DeterministicResult,
+  env: GovernanceAgentEnv,
+): { tools: Record<string, ReturnType<typeof createTool>>; getChosen: () => string | null } {
+  const chosen: { value: string | null } = { value: null };
+  const acceptDeterministicTool = createTool({
+    id: "acceptDeterministic",
+    description: "Accept the deterministic result. The pre-computed outcome (approve, reject, or pending) will be published.",
+    inputSchema: z.object({}),
+    outputSchema: z.object({ ok: z.boolean() }),
+    execute: async () => {
+      chosen.value = "acceptDeterministic";
+      await commitDeterministicResult(proposal, deterministicResult, env, "oversight_acceptDeterministic");
+      return { ok: true };
+    },
+  });
+  const escalateToLLMTool = createTool({
+    id: "escalateToLLM",
+    description: "Escalate to the full governance LLM for richer reasoning and a final approve/reject decision.",
+    inputSchema: z.object({}),
+    outputSchema: z.object({ ok: z.boolean() }),
+    execute: async () => {
+      chosen.value = "escalateToLLM";
+      await processProposalWithAgent(proposal, env);
+      return { ok: true };
+    },
+  });
+  const escalateToHumanTool = createTool({
+    id: "escalateToHuman",
+    description: "Escalate to human-in-the-loop (MITL) for manual approval.",
+    inputSchema: z.object({}),
+    outputSchema: z.object({ ok: z.boolean() }),
+    execute: async () => {
+      chosen.value = "escalateToHuman";
+      const actionPayload = deterministicResult.actionPayload;
+      if (actionPayload) {
+        const { proposal_id, proposed_action } = proposal;
+        recordProposal(proposed_action, "pending");
+        addPending(proposal_id, proposal, actionPayload);
+        await env.getPublishAction()(`swarm.pending_approval.${proposal_id}`, {
+          proposal_id,
+          status: "pending",
+        } as Record<string, unknown>);
+        await appendEvent({
+          type: "proposal_pending_approval",
+          proposal_id,
+          governance_path: "oversight_escalateToHuman",
+        });
+        logger.info("proposal pending MITL approval (oversight)", { proposal_id });
+      } else {
+        await commitDeterministicResult(proposal, deterministicResult, env);
+      }
+      return { ok: true };
+    },
+  });
+  return {
+    tools: {
+      acceptDeterministic: acceptDeterministicTool,
+      escalateToLLM: escalateToLLMTool,
+      escalateToHuman: escalateToHumanTool,
+    },
+    getChosen: () => chosen.value,
+  };
+}
+
+/**
+ * Run the oversight agent: it chooses acceptDeterministic, escalateToLLM, or escalateToHuman.
+ * If it does not call any tool (e.g. maxSteps), we fall back to committing the deterministic result.
+ */
+export async function runOversightAgent(
+  proposal: Proposal,
+  deterministicResult: DeterministicResult,
+  env: GovernanceAgentEnv,
+): Promise<void> {
+  const modelConfig = getOversightModelConfig();
+  if (!modelConfig) {
+    await commitDeterministicResult(proposal, deterministicResult, env);
+    return;
+  }
+  const { tools, getChosen } = createOversightTools(proposal, deterministicResult, env);
+  const agent = new Agent({
+    id: "oversight-agent",
+    name: "Oversight Agent",
+    instructions: OVERSIGHT_AGENT_INSTRUCTIONS,
+    model: modelConfig,
+    tools,
+  });
+  const summary = `${deterministicResult.outcome}: ${deterministicResult.reason}`;
+  const prompt = `Proposal: proposal_id=${proposal.proposal_id} agent=${proposal.agent} target_node=${proposal.target_node} payload=${JSON.stringify(proposal.payload)}. Deterministic result: ${summary}. Choose one: acceptDeterministic, escalateToLLM, or escalateToHuman. Call the corresponding tool.`;
+  const abortController = new AbortController();
+  setMaxListeners(64, abortController.signal);
+  await agent.generate(prompt, { maxSteps: 5, abortSignal: abortController.signal });
+  if (!getChosen()) {
+    logger.info("oversight agent did not call a tool; committing deterministic result", {
+      proposal_id: proposal.proposal_id,
+    });
+    await commitDeterministicResult(proposal, deterministicResult, env, "oversight_acceptDeterministic");
+  }
+}
 
 function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
   const { expectedEpoch, from, to } = (proposal.payload ?? {}) as {
@@ -165,7 +296,12 @@ function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
         payload: { expectedEpoch, runId: state.runId, from, to },
       };
       await env.getPublishAction()("swarm.actions.advance_state", action as unknown as Record<string, unknown>);
-      await appendEvent({ type: "proposal_approved", proposal_id: proposal.proposal_id, reason });
+      await appendEvent({
+        type: "proposal_approved",
+        proposal_id: proposal.proposal_id,
+        reason,
+        governance_path: "processProposalWithAgent",
+      });
       logger.info("proposal approved (agent)", { proposal_id: proposal.proposal_id, reason });
       return { ok: true };
     },
@@ -193,6 +329,7 @@ function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
         type: "proposal_rejected",
         proposal_id: proposal.proposal_id,
         reason,
+        governance_path: "processProposalWithAgent",
       });
       logger.info("proposal rejected (agent)", { proposal_id: proposal.proposal_id, reason });
       return { ok: true };
@@ -240,38 +377,32 @@ export async function processProposalWithAgent(
     },
   });
   const prompt = `Proposal: proposal_id=${proposal.proposal_id} agent=${proposal.agent} target_node=${proposal.target_node} payload=${JSON.stringify(proposal.payload)}. Decide approve or reject and call the corresponding tool.`;
-  await agent.generate(prompt, { maxSteps: 12 });
+  const abortController = new AbortController();
+  setMaxListeners(64, abortController.signal);
+  await agent.generate(prompt, { maxSteps: 12, abortSignal: abortController.signal });
   if (!tools.isDecided()) {
     logger.info("governance agent did not decide; falling back to rule-based", { proposal_id: proposal.proposal_id });
     await processProposal(proposal, env);
   }
 }
 
-export async function processProposal(
+/**
+ * Evaluate a proposal with the same logic as processProposal but without publishing.
+ * Returns the outcome and reason (and actionPayload when approve/pending) for use by oversight or commit.
+ */
+export async function evaluateProposalDeterministic(
   proposal: Proposal,
   env: GovernanceAgentEnv,
-): Promise<void> {
-  const { proposal_id, agent, proposed_action, target_node, payload, mode } = proposal;
+): Promise<DeterministicResult> {
+  const { agent, proposed_action, target_node, payload, mode } = proposal;
   if (proposed_action !== "advance_state") {
-    logger.debug("ignoring non advance_state proposal", { proposal_id });
-    return;
+    return { outcome: "ignore", reason: "non advance_state proposal" };
   }
 
   const { expectedEpoch, from, to } = payload as { expectedEpoch: number; from: string; to: string };
   const state = await loadState();
   if (!state || state.epoch !== expectedEpoch) {
-    recordProposal(proposed_action, "rejected");
-    await env.getPublishRejection()(`swarm.rejections.${proposed_action}`, {
-      proposal_id,
-      reason: "state_epoch_mismatch",
-      result: "rejected",
-    });
-    await appendEvent({
-      type: "proposal_rejected",
-      proposal_id,
-      reason: "state_epoch_mismatch",
-    });
-    return;
+    return { outcome: "reject", reason: "state_epoch_mismatch" };
   }
 
   const driftRaw = await s3GetText(env.s3, env.bucket, "drift/latest.json");
@@ -282,74 +413,127 @@ export async function processProposal(
   const governance = loadPolicies(govPath);
 
   if (mode === "MASTER") {
-    recordProposal(proposed_action, "approved");
-    const action: Action = {
-      proposal_id,
-      approved_by: AGENT_ID,
-      result: "approved",
+    return {
+      outcome: "approve",
       reason: "master_override",
-      action_type: "advance_state",
-      payload: { expectedEpoch, runId: state.runId, from, to },
+      actionPayload: { expectedEpoch, runId: state.runId, from, to },
     };
-    await env.getPublishAction()("swarm.actions.advance_state", action as unknown as Record<string, unknown>);
-    await appendEvent({ type: "proposal_approved", proposal_id, reason: "master_override" });
-    logger.info("proposal approved (master)", { proposal_id });
-    return;
   }
 
   const decision = canTransition(from, to, drift, governance);
   if (!decision.allowed) {
-    recordProposal(proposed_action, "rejected");
-    await env.getPublishRejection()(`swarm.rejections.${proposed_action}`, {
-      proposal_id,
+    return {
+      outcome: "reject",
       reason: decision.reason,
-      result: "rejected",
-    });
-    await appendEvent({ type: "proposal_rejected", proposal_id, reason: decision.reason });
-    logger.info("proposal rejected", { proposal_id, reason: decision.reason });
-    return;
+      actionPayload: { expectedEpoch, runId: state.runId, from, to },
+    };
   }
 
   const policyResult = await checkPermission(agent, "writer", target_node);
   if (!policyResult.allowed) {
-    recordProposal(proposed_action, "rejected");
-    recordPolicyViolation();
-    const reason = policyResult.error ?? "policy_denied";
-    await env.getPublishRejection()(`swarm.rejections.${proposed_action}`, {
-      proposal_id,
-      reason,
-      result: "rejected",
-    });
-    await appendEvent({ type: "proposal_rejected", proposal_id, reason });
-    logger.info("proposal rejected (policy)", { proposal_id, reason });
-    return;
+    return {
+      outcome: "reject",
+      reason: policyResult.error ?? "policy_denied",
+      actionPayload: { expectedEpoch, runId: state.runId, from, to },
+    };
   }
 
   if (mode === "MITL") {
+    return {
+      outcome: "pending",
+      reason: "mitl_required",
+      actionPayload: { expectedEpoch, runId: state.runId, from, to },
+    };
+  }
+
+  return {
+    outcome: "approve",
+    reason: "policy_passed",
+    actionPayload: { expectedEpoch, runId: state.runId, from, to },
+  };
+}
+
+/**
+ * Commit a pre-computed deterministic result: publish action/rejection/pending and record metrics/events.
+ * Used by processProposal and by the oversight agent when it chooses acceptDeterministic.
+ * @param path - Governance path for audit (context_events); default "processProposal"
+ */
+export async function commitDeterministicResult(
+  proposal: Proposal,
+  result: DeterministicResult,
+  env: GovernanceAgentEnv,
+  path: GovernancePath = "processProposal",
+): Promise<void> {
+  const { proposal_id, proposed_action } = proposal;
+  if (result.outcome === "ignore") {
+    logger.debug("ignoring non advance_state proposal", { proposal_id });
+    return;
+  }
+
+  if (result.outcome === "reject") {
+    if (result.reason === "policy_denied") {
+      recordPolicyViolation();
+    }
+    recordProposal(proposed_action, "rejected");
+    await env.getPublishRejection()(`swarm.rejections.${proposed_action}`, {
+      proposal_id,
+      reason: result.reason,
+      result: "rejected",
+    });
+    await appendEvent({
+      type: "proposal_rejected",
+      proposal_id,
+      reason: result.reason,
+      governance_path: path,
+    });
+    logger.info("proposal rejected", { proposal_id, reason: result.reason, governance_path: path });
+    return;
+  }
+
+  if (result.outcome === "pending" && result.actionPayload) {
     recordProposal(proposed_action, "pending");
-    const actionPayload = { expectedEpoch, runId: state.runId, from, to };
-    addPending(proposal_id, proposal, actionPayload);
+    addPending(proposal_id, proposal, result.actionPayload);
     await env.getPublishAction()(`swarm.pending_approval.${proposal_id}`, {
       proposal_id,
       status: "pending",
     } as Record<string, unknown>);
-    await appendEvent({ type: "proposal_pending_approval", proposal_id });
-    logger.info("proposal pending MITL approval", { proposal_id });
+    await appendEvent({
+      type: "proposal_pending_approval",
+      proposal_id,
+      governance_path: path,
+    });
+    logger.info("proposal pending MITL approval", { proposal_id, governance_path: path });
     return;
   }
 
-  recordProposal(proposed_action, "approved");
-  const action: Action = {
-    proposal_id,
-    approved_by: "auto",
-    result: "approved",
-    reason: "policy_passed",
-    action_type: "advance_state",
-    payload: { expectedEpoch, runId: state.runId, from, to },
-  };
-  await env.getPublishAction()("swarm.actions.advance_state", action as unknown as Record<string, unknown>);
-  await appendEvent({ type: "proposal_approved", proposal_id, reason: "policy_passed" });
-  logger.info("proposal approved", { proposal_id });
+  if (result.outcome === "approve" && result.actionPayload) {
+    const isMaster = result.reason === "master_override";
+    recordProposal(proposed_action, "approved");
+    const action: Action = {
+      proposal_id,
+      approved_by: isMaster ? AGENT_ID : "auto",
+      result: "approved",
+      reason: result.reason,
+      action_type: "advance_state",
+      payload: result.actionPayload,
+    };
+    await env.getPublishAction()("swarm.actions.advance_state", action as unknown as Record<string, unknown>);
+    await appendEvent({
+      type: "proposal_approved",
+      proposal_id,
+      reason: result.reason,
+      governance_path: path,
+    });
+    logger.info("proposal approved", { proposal_id, reason: result.reason, governance_path: path });
+  }
+}
+
+export async function processProposal(
+  proposal: Proposal,
+  env: GovernanceAgentEnv,
+): Promise<void> {
+  const result = await evaluateProposalDeterministic(proposal, env);
+  await commitDeterministicResult(proposal, result, env);
 }
 
 /**
@@ -411,10 +595,13 @@ export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket
         };
         if (proposal.mode === "MASTER" || proposal.mode === "MITL") {
           await processProposal(proposal, env);
-        } else if (getChatModelConfig()) {
-          await processProposalWithAgent(proposal, env);
         } else {
-          await processProposal(proposal, env);
+          const deterministicResult = await evaluateProposalDeterministic(proposal, env);
+          if (!getChatModelConfig()) {
+            await commitDeterministicResult(proposal, deterministicResult, env);
+          } else {
+            await runOversightAgent(proposal, deterministicResult, env);
+          }
         }
         runFinalityCheck(SCOPE_ID).catch((err) => {
           logger.error("finality check error", { scope_id: SCOPE_ID, error: String(err) });

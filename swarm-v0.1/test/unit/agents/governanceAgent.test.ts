@@ -4,6 +4,9 @@ import { Readable } from "stream";
 import { HeadObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import {
   processProposal,
+  evaluateProposalDeterministic,
+  commitDeterministicResult,
+  runOversightAgent,
   runFinalityCheck,
   type GovernanceAgentEnv,
 } from "../../../src/agents/governanceAgent";
@@ -12,6 +15,8 @@ import type { Proposal } from "../../../src/events";
 const { mockLoadState } = vi.hoisted(() => ({ mockLoadState: vi.fn() }));
 const { mockEvaluateFinality } = vi.hoisted(() => ({ mockEvaluateFinality: vi.fn() }));
 const { mockSubmitFinalityReviewForScope } = vi.hoisted(() => ({ mockSubmitFinalityReviewForScope: vi.fn() }));
+const { mockCheckPermission } = vi.hoisted(() => ({ mockCheckPermission: vi.fn() }));
+const { mockGetOversightModelConfig } = vi.hoisted(() => ({ mockGetOversightModelConfig: vi.fn() }));
 
 vi.mock("../../../src/stateGraph", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../src/stateGraph")>();
@@ -26,6 +31,19 @@ vi.mock("../../../src/finalityEvaluator", () => ({
 vi.mock("../../../src/hitlFinalityRequest", () => ({
   submitFinalityReviewForScope: (...args: unknown[]) => mockSubmitFinalityReviewForScope(...args),
 }));
+vi.mock("../../../src/policy", () => ({
+  checkPermission: (...args: unknown[]) => mockCheckPermission(...args),
+}));
+vi.mock("../../../src/modelConfig", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../src/modelConfig")>();
+  return {
+    ...actual,
+    getOversightModelConfig: () => {
+      const over = mockGetOversightModelConfig();
+      return over !== undefined ? over : actual.getOversightModelConfig();
+    },
+  };
+});
 
 function createMockS3(driftLevel: string): S3Client {
   const drift = { level: driftLevel, types: [] as string[] };
@@ -54,6 +72,8 @@ describe("governanceAgent", () => {
     publishRejection = vi.fn(async (subj, data) => {
       rejectionCalls.push({ subject: subj, data });
     });
+    mockCheckPermission.mockResolvedValue({ allowed: true });
+    mockGetOversightModelConfig.mockReturnValue(undefined);
   });
 
   it("approves proposal when transition is allowed (low drift)", async () => {
@@ -147,6 +167,305 @@ describe("governanceAgent", () => {
     expect(pendingList[0].proposal_id).toBe("p-mitl");
     expect(actionCalls.some((c) => c.subject.startsWith("swarm.pending_approval"))).toBe(true);
     expect(actionCalls.filter((c) => c.subject === "swarm.actions.advance_state")).toHaveLength(0);
+  });
+
+  describe("evaluateProposalDeterministic", () => {
+    it("returns ignore for non advance_state proposal", async () => {
+      const s3 = createMockS3("low");
+      const env: GovernanceAgentEnv = {
+        s3,
+        bucket: "b",
+        getPublishAction: () => publishAction,
+        getPublishRejection: () => publishRejection,
+      };
+      const proposal: Proposal = {
+        proposal_id: "p1",
+        agent: "facts-1",
+        proposed_action: "other",
+        target_node: "FactsExtracted",
+        payload: {},
+        mode: "YOLO",
+      };
+      const result = await evaluateProposalDeterministic(proposal, env);
+      expect(result.outcome).toBe("ignore");
+      expect(result.reason).toContain("non advance_state");
+      expect(actionCalls).toHaveLength(0);
+      expect(rejectionCalls).toHaveLength(0);
+    });
+
+    it("returns reject with state_epoch_mismatch when epoch does not match", async () => {
+      mockLoadState.mockResolvedValue({
+        runId: "r1",
+        lastNode: "ContextIngested",
+        updatedAt: "",
+        epoch: 2,
+      });
+      const s3 = createMockS3("low");
+      const env: GovernanceAgentEnv = {
+        s3,
+        bucket: "b",
+        getPublishAction: () => publishAction,
+        getPublishRejection: () => publishRejection,
+      };
+      const proposal: Proposal = {
+        proposal_id: "p1",
+        agent: "facts-1",
+        proposed_action: "advance_state",
+        target_node: "FactsExtracted",
+        payload: { expectedEpoch: 1, from: "ContextIngested", to: "FactsExtracted" },
+        mode: "YOLO",
+      };
+      const result = await evaluateProposalDeterministic(proposal, env);
+      expect(result.outcome).toBe("reject");
+      expect(result.reason).toBe("state_epoch_mismatch");
+      expect(actionCalls).toHaveLength(0);
+    });
+
+    it("returns approve with master_override and actionPayload when mode is MASTER", async () => {
+      mockLoadState.mockResolvedValue({
+        runId: "r1",
+        lastNode: "ContextIngested",
+        updatedAt: "",
+        epoch: 1,
+      });
+      const s3 = createMockS3("high");
+      const env: GovernanceAgentEnv = {
+        s3,
+        bucket: "b",
+        getPublishAction: () => publishAction,
+        getPublishRejection: () => publishRejection,
+      };
+      const proposal: Proposal = {
+        proposal_id: "p1",
+        agent: "facts-1",
+        proposed_action: "advance_state",
+        target_node: "FactsExtracted",
+        payload: { expectedEpoch: 1, from: "ContextIngested", to: "FactsExtracted" },
+        mode: "MASTER",
+      };
+      const result = await evaluateProposalDeterministic(proposal, env);
+      expect(result.outcome).toBe("approve");
+      expect(result.reason).toBe("master_override");
+      expect(result.actionPayload).toEqual({
+        expectedEpoch: 1,
+        runId: "r1",
+        from: "ContextIngested",
+        to: "FactsExtracted",
+      });
+    });
+
+    it("returns reject with transition reason when canTransition blocks", async () => {
+      mockLoadState.mockResolvedValue({
+        runId: "r1",
+        lastNode: "DriftChecked",
+        updatedAt: "",
+        epoch: 5,
+      });
+      const s3 = createMockS3("high");
+      const env: GovernanceAgentEnv = {
+        s3,
+        bucket: "b",
+        getPublishAction: () => publishAction,
+        getPublishRejection: () => publishRejection,
+      };
+      const proposal: Proposal = {
+        proposal_id: "p2",
+        agent: "planner-1",
+        proposed_action: "advance_state",
+        target_node: "ContextIngested",
+        payload: { expectedEpoch: 5, from: "DriftChecked", to: "ContextIngested" },
+        mode: "YOLO",
+      };
+      const result = await evaluateProposalDeterministic(proposal, env);
+      expect(result.outcome).toBe("reject");
+      expect(result.reason).toContain("High drift");
+      expect(result.actionPayload).toBeDefined();
+    });
+
+    it("returns reject with policy_denied when checkPermission denies", async () => {
+      mockCheckPermission.mockResolvedValue({ allowed: false, error: "policy_denied" });
+      mockLoadState.mockResolvedValue({
+        runId: "r1",
+        lastNode: "ContextIngested",
+        updatedAt: "",
+        epoch: 1,
+      });
+      const s3 = createMockS3("low");
+      const env: GovernanceAgentEnv = {
+        s3,
+        bucket: "b",
+        getPublishAction: () => publishAction,
+        getPublishRejection: () => publishRejection,
+      };
+      const proposal: Proposal = {
+        proposal_id: "p1",
+        agent: "facts-1",
+        proposed_action: "advance_state",
+        target_node: "FactsExtracted",
+        payload: { expectedEpoch: 1, from: "ContextIngested", to: "FactsExtracted" },
+        mode: "YOLO",
+      };
+      const result = await evaluateProposalDeterministic(proposal, env);
+      expect(result.outcome).toBe("reject");
+      expect(result.reason).toBe("policy_denied");
+      expect(result.actionPayload).toBeDefined();
+    });
+
+    it("returns pending with actionPayload when mode is MITL", async () => {
+      mockLoadState.mockResolvedValue({
+        runId: "r1",
+        lastNode: "ContextIngested",
+        updatedAt: "",
+        epoch: 1,
+      });
+      const s3 = createMockS3("low");
+      const env: GovernanceAgentEnv = {
+        s3,
+        bucket: "b",
+        getPublishAction: () => publishAction,
+        getPublishRejection: () => publishRejection,
+      };
+      const proposal: Proposal = {
+        proposal_id: "p-mitl",
+        agent: "facts-1",
+        proposed_action: "advance_state",
+        target_node: "FactsExtracted",
+        payload: { expectedEpoch: 1, from: "ContextIngested", to: "FactsExtracted" },
+        mode: "MITL",
+      };
+      const result = await evaluateProposalDeterministic(proposal, env);
+      expect(result.outcome).toBe("pending");
+      expect(result.reason).toBe("mitl_required");
+      expect(result.actionPayload).toEqual({
+        expectedEpoch: 1,
+        runId: "r1",
+        from: "ContextIngested",
+        to: "FactsExtracted",
+      });
+    });
+
+    it("returns approve with policy_passed for YOLO when transition and policy allow", async () => {
+      mockLoadState.mockResolvedValue({
+        runId: "r1",
+        lastNode: "ContextIngested",
+        updatedAt: "",
+        epoch: 1,
+      });
+      const s3 = createMockS3("low");
+      const env: GovernanceAgentEnv = {
+        s3,
+        bucket: "b",
+        getPublishAction: () => publishAction,
+        getPublishRejection: () => publishRejection,
+      };
+      const proposal: Proposal = {
+        proposal_id: "p1",
+        agent: "facts-1",
+        proposed_action: "advance_state",
+        target_node: "FactsExtracted",
+        payload: { expectedEpoch: 1, from: "ContextIngested", to: "FactsExtracted" },
+        mode: "YOLO",
+      };
+      const result = await evaluateProposalDeterministic(proposal, env);
+      expect(result.outcome).toBe("approve");
+      expect(result.reason).toBe("policy_passed");
+      expect(result.actionPayload).toEqual({
+        expectedEpoch: 1,
+        runId: "r1",
+        from: "ContextIngested",
+        to: "FactsExtracted",
+      });
+    });
+  });
+
+  describe("commitDeterministicResult", () => {
+    it("publishes approval when result outcome is approve with actionPayload", async () => {
+      mockLoadState.mockResolvedValue({});
+      const s3 = createMockS3("low");
+      const env: GovernanceAgentEnv = {
+        s3,
+        bucket: "b",
+        getPublishAction: () => publishAction,
+        getPublishRejection: () => publishRejection,
+      };
+      const proposal: Proposal = {
+        proposal_id: "p1",
+        agent: "facts-1",
+        proposed_action: "advance_state",
+        target_node: "FactsExtracted",
+        payload: { expectedEpoch: 1, from: "ContextIngested", to: "FactsExtracted" },
+        mode: "YOLO",
+      };
+      const result = {
+        outcome: "approve" as const,
+        reason: "policy_passed",
+        actionPayload: { expectedEpoch: 1, runId: "r1", from: "ContextIngested", to: "FactsExtracted" },
+      };
+      await commitDeterministicResult(proposal, result, env);
+      expect(actionCalls).toHaveLength(1);
+      expect(actionCalls[0].subject).toBe("swarm.actions.advance_state");
+      expect(actionCalls[0].data.result).toBe("approved");
+      expect(rejectionCalls).toHaveLength(0);
+    });
+
+    it("publishes rejection when result outcome is reject", async () => {
+      const s3 = createMockS3("low");
+      const env: GovernanceAgentEnv = {
+        s3,
+        bucket: "b",
+        getPublishAction: () => publishAction,
+        getPublishRejection: () => publishRejection,
+      };
+      const proposal: Proposal = {
+        proposal_id: "p1",
+        agent: "facts-1",
+        proposed_action: "advance_state",
+        target_node: "FactsExtracted",
+        payload: {},
+        mode: "YOLO",
+      };
+      const result = { outcome: "reject" as const, reason: "state_epoch_mismatch" };
+      await commitDeterministicResult(proposal, result, env);
+      expect(rejectionCalls).toHaveLength(1);
+      expect(rejectionCalls[0].data.reason).toBe("state_epoch_mismatch");
+      expect(actionCalls).toHaveLength(0);
+    });
+  });
+
+  describe("runOversightAgent", () => {
+    it("commits deterministic result when no oversight model config (no LLM)", async () => {
+      mockGetOversightModelConfig.mockReturnValue(null);
+      mockLoadState.mockResolvedValue({
+        runId: "r1",
+        lastNode: "ContextIngested",
+        updatedAt: "",
+        epoch: 1,
+      });
+      const s3 = createMockS3("low");
+      const env: GovernanceAgentEnv = {
+        s3,
+        bucket: "b",
+        getPublishAction: () => publishAction,
+        getPublishRejection: () => publishRejection,
+      };
+      const proposal: Proposal = {
+        proposal_id: "p1",
+        agent: "facts-1",
+        proposed_action: "advance_state",
+        target_node: "FactsExtracted",
+        payload: { expectedEpoch: 1, from: "ContextIngested", to: "FactsExtracted" },
+        mode: "YOLO",
+      };
+      const deterministicResult = {
+        outcome: "approve" as const,
+        reason: "policy_passed",
+        actionPayload: { expectedEpoch: 1, runId: "r1", from: "ContextIngested", to: "FactsExtracted" },
+      };
+      await runOversightAgent(proposal, deterministicResult, env);
+      expect(actionCalls).toHaveLength(1);
+      expect(actionCalls[0].subject).toBe("swarm.actions.advance_state");
+      expect(rejectionCalls).toHaveLength(0);
+    });
   });
 
   describe("runFinalityCheck", () => {

@@ -53,6 +53,24 @@ When finality cannot be reached (e.g. contradiction or confidence below threshol
 - **CHECK_FEED=1**: Also checks the feed server (used by run-e2e.sh).
 - **swarm-all.sh** runs check:services first; if it fails, suggests starting Docker and optionally waiting with CHECK_SERVICES_MAX_WAIT_SEC.
 
+## Governance paths and E2E audit
+
+Governance does not always run deterministic-only: for YOLO proposals it runs deterministic evaluation first, then (when an LLM is configured) a small **oversight agent** chooses accept deterministic, escalate to full LLM, or escalate to human. All paths are auditable.
+
+**Routes (by proposal mode)**
+
+- **MASTER / MITL**: Handled directly by `processProposal` (no oversight). MASTER always approves; MITL adds to pending. Audit: `context_events` rows with `type` proposal_approved / proposal_pending_approval and `governance_path: "processProposal"`.
+- **YOLO**: (1) `evaluateProposalDeterministic` runs (no publish). (2) If no LLM: `commitDeterministicResult` with path `processProposal`. (3) If LLM: oversight agent runs; it may call `acceptDeterministic` (path `oversight_acceptDeterministic`), `escalateToLLM` (then full agent emits path `processProposalWithAgent`), or `escalateToHuman` (path `oversight_escalateToHuman`). Fallback when oversight does not call a tool: commit with path `oversight_acceptDeterministic`.
+
+**Audit fields in context_events**
+
+Every proposal decision written to the WAL includes `governance_path` when applicable: `processProposal` | `oversight_acceptDeterministic` | `oversight_escalateToLLM` | `oversight_escalateToHuman` | `processProposalWithAgent`. Query by `data->>'type' IN ('proposal_approved','proposal_rejected','proposal_pending_approval')` and `data->>'governance_path'` to verify which path was taken.
+
+**E2E fixture and verification**
+
+- **seed:governance-e2e**: Sets state (DriftChecked, epoch 5) and drift (high), then publishes three proposals: MASTER, MITL, YOLO (same transition). Expectation: MASTER approved (processProposal), MITL pending (processProposal), YOLO rejected (processProposal or oversight_acceptDeterministic). Prerequisites: migrations 002/003, S3 bucket, NATS stream; governance agent must run after seed to consume proposals.
+- **verify:governance-paths**: Reads `context_events` and checks that at least one approved with processProposal + master_override, one pending with processProposal, and one rejected (reason containing "drift"). Exit 1 if any check fails. Run after governance has processed the seeded proposals.
+
 ## E2E
 
 - **scripts/run-e2e.sh**: Starts Docker (postgres, s3, nats, facts-worker, feed), waits for Postgres then runs **check-services** (with CHECK_FEED=1, max wait 300s) so facts-worker and feed are ready before reset/migrations/seed/bootstrap/swarm. Then migrations 002/003/005, ensure-bucket, ensure-stream, seed, bootstrap, **ensure-pull-consumers**, swarm:all, waits, POSTs a doc, and checks summary and nodes/edges.

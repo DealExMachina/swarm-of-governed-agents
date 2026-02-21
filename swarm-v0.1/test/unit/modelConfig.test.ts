@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   getChatModelConfig,
+  getOversightModelConfig,
   getOllamaBaseUrl,
   getExtractionModel,
   getRationaleModel,
@@ -24,6 +25,7 @@ describe("modelConfig", () => {
     vi.stubEnv("EMBEDDING_MODEL", "");
     vi.stubEnv("NEAR_FINALITY_THRESHOLD", "");
     vi.stubEnv("AUTO_FINALITY_THRESHOLD", "");
+    vi.stubEnv("OVERSEE_MODEL", "");
   });
 
   afterEach(() => {
@@ -131,6 +133,30 @@ describe("modelConfig", () => {
       const cfg = getChatModelConfig();
       expect(cfg).not.toBeNull();
       expect(cfg!.apiKey).toBe("ollama");
+    });
+  });
+
+  describe("getOversightModelConfig", () => {
+    it("returns null when getChatModelConfig is null", () => {
+      expect(getOversightModelConfig()).toBeNull();
+    });
+
+    it("returns same as getChatModelConfig when OVERSEE_MODEL unset", () => {
+      vi.stubEnv("OPENAI_API_KEY", "sk-test");
+      vi.stubEnv("OPENAI_MODEL", "gpt-4o-mini");
+      const chat = getChatModelConfig();
+      const over = getOversightModelConfig();
+      expect(over).not.toBeNull();
+      expect(over!.id).toBe(chat!.id);
+    });
+
+    it("returns config with OVERSEE_MODEL when set", () => {
+      vi.stubEnv("OPENAI_API_KEY", "sk-test");
+      vi.stubEnv("OPENAI_MODEL", "gpt-4o");
+      vi.stubEnv("OVERSEE_MODEL", "gpt-4o-mini");
+      const over = getOversightModelConfig();
+      expect(over).not.toBeNull();
+      expect(over!.id).toContain("gpt-4o-mini");
     });
   });
 });

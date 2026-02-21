@@ -39,6 +39,19 @@ export function getChatModelConfig(
   return { id, url, apiKey };
 }
 
+/**
+ * Model config for the oversight (routing) agent. When OVERSEE_MODEL is set, uses that model;
+ * otherwise falls back to getChatModelConfig() so the oversight step can use a cheaper model.
+ */
+export function getOversightModelConfig(): ChatModelConfig | null {
+  const base = getChatModelConfig();
+  if (!base) return null;
+  const overSee = process.env.OVERSEE_MODEL?.trim();
+  if (!overSee) return base;
+  const id = (overSee.includes("/") ? overSee : `openai/${overSee}`) as `${string}/${string}`;
+  return { ...base, id };
+}
+
 /** Ollama base URL (e.g. http://localhost:11434 or http://host.docker.internal:11434). When set, Ollama is used for extraction/rationale/HITL/embeddings. */
 export function getOllamaBaseUrl(): string | null {
   const u = process.env.OLLAMA_BASE_URL?.trim();

@@ -50,6 +50,9 @@ node --loader ts-node/esm scripts/bootstrap-once.ts
 echo "[E2E] 5b. Ensure pull consumers (remove any existing push consumers)..."
 node --loader ts-node/esm scripts/ensure-pull-consumers.ts 2>/dev/null || true
 
+echo "[E2E] 5c. Seed governance E2E (state, drift, MASTER/MITL/YOLO proposals)..."
+node --loader ts-node/esm scripts/seed-governance-e2e.ts 2>/dev/null || true
+
 echo "[E2E] 6. Starting swarm (4 agents + governance + executor)..."
 LOG_DIR="${LOG_DIR:-/tmp}"
 mkdir -p "$LOG_DIR"
@@ -86,5 +89,8 @@ PGPASSWORD="${POSTGRES_PASSWORD:-swarm}" psql -h localhost -p 5433 -U "${POSTGRE
 
 echo "[E2E] 11. Edges count..."
 PGPASSWORD="${POSTGRES_PASSWORD:-swarm}" psql -h localhost -p 5433 -U "${POSTGRES_USER:-swarm}" -d "${POSTGRES_DB:-swarm}" -t -c "SELECT edge_type, COUNT(*) FROM edges GROUP BY edge_type;"
+
+echo "[E2E] 12. Verify governance paths (auditable)..."
+node --loader ts-node/esm scripts/verify-governance-paths.ts
 
 echo "[E2E] Done. Logs: $LOG_DIR/swarm-*.log"

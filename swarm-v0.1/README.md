@@ -208,6 +208,8 @@ Set in `governance.yaml`:
 | `npm run bootstrap-once` | Publish bootstrap job and append bootstrap WAL event. |
 | `npm run seed:all` | Seed context WAL from `seed-docs/`. |
 | `npm run seed:hitl` | Seed semantic graph for a deterministic HITL finality scenario. |
+| `npm run seed:governance-e2e` | Seed state/drift and publish MASTER/MITL/YOLO proposals for governance path E2E. |
+| `npm run verify:governance-paths` | Verify context_events contain expected governance paths (run after seed:governance-e2e and governance). |
 | `npm run reset-e2e` | Truncate DB, empty S3, delete NATS stream. |
 | `npm run ensure-stream` | Create or update NATS stream. |
 | `npm run ensure-bucket` | Create S3 bucket if missing. |
@@ -239,6 +241,7 @@ pytest tests/ -v      # Python facts-worker unit + integration
 ## Optional
 
 - **HITL finality scenario:** `npm run seed:hitl` seeds a near-finality state with an unresolved contradiction. Run the swarm; when governance evaluates finality, a `finality_review` appears in the MITL queue with explanation and options. See STATUS.md.
+- **Governance path E2E:** `npm run seed:governance-e2e` publishes MASTER/MITL/YOLO proposals; after the governance agent runs, `npm run verify:governance-paths` checks that context_events contain the expected auditable paths (processProposal, and optionally oversight_*). See STATUS.md "Governance paths and E2E audit".
 - **Embeddings:** Set `FACTS_SYNC_EMBED=1` + Ollama serving `bge-m3`. Claim nodes get 1024-d embeddings for semantic search.
 - **Tuner agent:** `AGENT_ROLE=tuner npm run swarm` runs a periodic loop (every ~30min) that uses an LLM to optimize activation filter configs based on productive/wasted ratio stats.
 - **Observability:** Configure `OTEL_*` in `.env` to send traces and metrics to the otel-collector.
