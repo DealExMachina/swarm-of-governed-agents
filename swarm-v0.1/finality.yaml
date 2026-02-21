@@ -1,0 +1,47 @@
+goal_gradient:
+  weights:
+    claim_confidence: 0.30
+    contradiction_resolution: 0.30
+    goal_completion: 0.25
+    risk_score_inverse: 0.15
+  near_finality_threshold: 0.75
+  auto_finality_threshold: 0.92
+
+finality:
+  RESOLVED:
+    mode: all
+    conditions:
+      - claims.active.min_confidence: 0.85
+      - contradictions.unresolved_count: 0
+      - risks.critical.active_count: 0
+      - goals.completion_ratio: ">= 0.90"
+      - scope.risk_score: "< 0.20"
+    description: >
+      All active claims high-confidence, no unresolved contradictions,
+      no critical risks open, 90%+ goals have resolutions, risk score low.
+
+  ESCALATED:
+    mode: any
+    conditions:
+      - scope.risk_score: ">= 0.75"
+      - contradictions.unresolved_count: ">= 3"
+      - assessments.critical_unaddressed_count: ">= 2"
+      - scope.idle_cycles: ">= 10"
+    description: >
+      Risk threshold exceeded or too many unaddressed critical assessments.
+
+  BLOCKED:
+    mode: all
+    conditions:
+      - scope.idle_cycles: ">= 5"
+      - scope.last_delta_age_ms: ">= 300000"
+      - contradictions.unresolved_count: ">= 1"
+    description: >
+      System stuck; issues exist but no agent progress.
+
+  EXPIRED:
+    mode: all
+    conditions:
+      - scope.last_active_age_ms: ">= 2592000000"
+    description: >
+      Scope inactive for 30 days.

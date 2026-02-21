@@ -34,6 +34,9 @@ export function _clearPendingForTest(): void {
 export async function approvePending(proposalId: string): Promise<{ ok: boolean; error?: string }> {
   const item = pending.get(proposalId);
   if (!item) return { ok: false, error: "not_found" };
+  if (item.actionPayload?.type === "finality_review") {
+    return { ok: false, error: "use_finality_response" };
+  }
   const action: Action = {
     proposal_id: proposalId,
     approved_by: "human",
@@ -43,6 +46,32 @@ export async function approvePending(proposalId: string): Promise<{ ok: boolean;
     payload: item.actionPayload,
   };
   await publishAction("swarm.actions.advance_state", action as unknown as Record<string, unknown>);
+  pending.delete(proposalId);
+  return { ok: true };
+}
+
+export type FinalityOptionAction = "approve_finality" | "provide_resolution" | "escalate" | "defer";
+
+export async function resolveFinalityPending(
+  proposalId: string,
+  option: FinalityOptionAction,
+  days?: number,
+): Promise<{ ok: boolean; error?: string }> {
+  const item = pending.get(proposalId);
+  if (!item) return { ok: false, error: "not_found" };
+  if (item.actionPayload?.type !== "finality_review") {
+    return { ok: false, error: "not_finality_review" };
+  }
+  const actionPayload = {
+    proposal_id: proposalId,
+    approved_by: "human",
+    result: "finality_response",
+    action_type: "finality",
+    option,
+    days,
+    payload: item.actionPayload,
+  };
+  await publishAction("swarm.actions.finality", actionPayload as unknown as Record<string, unknown>);
   pending.delete(proposalId);
   return { ok: true };
 }
@@ -81,6 +110,7 @@ export function startMitlServer(port: number): void {
     const method = req.method ?? "GET";
     const match = url.match(/^\/approve\/([^/]+)$/);
     const matchReject = url.match(/^\/reject\/([^/]+)$/);
+    const matchFinality = url.match(/^\/finality-response\/([^/]+)$/);
 
     res.setHeader("Content-Type", "application/json");
     const send = (status: number, data: object) => {
@@ -100,6 +130,19 @@ export function startMitlServer(port: number): void {
     if (method === "POST" && matchReject) {
       const body = await parseBody(req);
       const result = await rejectPending(matchReject[1], body.reason as string);
+      send(result.ok ? 200 : 404, result);
+      return;
+    }
+    if (method === "POST" && matchFinality) {
+      const body = await parseBody(req);
+      const option = body.option as FinalityOptionAction | undefined;
+      const valid: FinalityOptionAction[] = ["approve_finality", "provide_resolution", "escalate", "defer"];
+      if (!option || !valid.includes(option)) {
+        send(400, { ok: false, error: "invalid_option" });
+        return;
+      }
+      const days = option === "defer" ? Number(body.days) ?? 7 : undefined;
+      const result = await resolveFinalityPending(matchFinality[1], option, days);
       send(result.ok ? 200 : 404, result);
       return;
     }

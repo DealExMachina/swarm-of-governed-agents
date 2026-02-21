@@ -2,16 +2,29 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { S3Client } from "@aws-sdk/client-s3";
 import { Readable } from "stream";
 import { HeadObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
-import { processProposal, type GovernanceAgentEnv } from "../../../src/agents/governanceAgent";
+import {
+  processProposal,
+  runFinalityCheck,
+  type GovernanceAgentEnv,
+} from "../../../src/agents/governanceAgent";
 import type { Proposal } from "../../../src/events";
 
 const { mockLoadState } = vi.hoisted(() => ({ mockLoadState: vi.fn() }));
+const { mockEvaluateFinality } = vi.hoisted(() => ({ mockEvaluateFinality: vi.fn() }));
+const { mockSubmitFinalityReviewForScope } = vi.hoisted(() => ({ mockSubmitFinalityReviewForScope: vi.fn() }));
+
 vi.mock("../../../src/stateGraph", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../src/stateGraph")>();
   return { ...actual, loadState: mockLoadState };
 });
 vi.mock("../../../src/contextWal", () => ({
   appendEvent: vi.fn(async () => 1),
+}));
+vi.mock("../../../src/finalityEvaluator", () => ({
+  evaluateFinality: (...args: unknown[]) => mockEvaluateFinality(...args),
+}));
+vi.mock("../../../src/hitlFinalityRequest", () => ({
+  submitFinalityReviewForScope: (...args: unknown[]) => mockSubmitFinalityReviewForScope(...args),
 }));
 
 function createMockS3(driftLevel: string): S3Client {
@@ -134,5 +147,44 @@ describe("governanceAgent", () => {
     expect(pendingList[0].proposal_id).toBe("p-mitl");
     expect(actionCalls.some((c) => c.subject.startsWith("swarm.pending_approval"))).toBe(true);
     expect(actionCalls.filter((c) => c.subject === "swarm.actions.advance_state")).toHaveLength(0);
+  });
+
+  describe("runFinalityCheck", () => {
+    beforeEach(() => {
+      mockEvaluateFinality.mockReset();
+      mockSubmitFinalityReviewForScope.mockReset();
+    });
+
+    it("calls evaluateFinality with the given scopeId", async () => {
+      mockEvaluateFinality.mockResolvedValue(null);
+      await runFinalityCheck("default");
+      expect(mockEvaluateFinality).toHaveBeenCalledTimes(1);
+      expect(mockEvaluateFinality).toHaveBeenCalledWith("default");
+      expect(mockSubmitFinalityReviewForScope).not.toHaveBeenCalled();
+    });
+
+    it("calls submitFinalityReviewForScope when evaluateFinality returns kind review", async () => {
+      mockEvaluateFinality.mockResolvedValue({
+        kind: "review",
+        request: {
+          type: "finality_review",
+          scope_id: "my-scope",
+          goal_score: 0.8,
+          dimension_breakdown: [],
+          blockers: [],
+          options: [],
+        },
+      });
+      await runFinalityCheck("my-scope");
+      expect(mockEvaluateFinality).toHaveBeenCalledWith("my-scope");
+      expect(mockSubmitFinalityReviewForScope).toHaveBeenCalledTimes(1);
+      expect(mockSubmitFinalityReviewForScope).toHaveBeenCalledWith("my-scope");
+    });
+
+    it("does not call submitFinalityReviewForScope when evaluateFinality returns status", async () => {
+      mockEvaluateFinality.mockResolvedValue({ kind: "status", status: "RESOLVED" });
+      await runFinalityCheck("default");
+      expect(mockSubmitFinalityReviewForScope).not.toHaveBeenCalled();
+    });
   });
 });

@@ -1,7 +1,7 @@
 /**
  * Tests that Mastra can reach the OpenAI-compatible endpoint using the same
  * config as the facts agent (getFactsModelConfig). Runs only when OPENAI_API_KEY
- * is set and not the placeholder. Load .env so OPENAI_BASE_URL / OPENAI_MODEL are used.
+ * is set (and not placeholder) and OLLAMA_BASE_URL is not set (so we use OpenAI).
  */
 import "dotenv/config";
 import { describe, it, expect } from "vitest";
@@ -10,7 +10,8 @@ import { getFactsModelConfig } from "../../../src/agents/factsAgent";
 
 const hasOpenAI =
   process.env.OPENAI_API_KEY &&
-  process.env.OPENAI_API_KEY !== "sk-xxxx";
+  process.env.OPENAI_API_KEY !== "sk-xxxx" &&
+  !process.env.OLLAMA_BASE_URL?.trim();
 
 describe.runIf(hasOpenAI)("factsAgent Mastra OpenAI access", () => {
   it("Mastra Agent with getFactsModelConfig() can call the configured model", async () => {

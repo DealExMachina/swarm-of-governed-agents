@@ -12,7 +12,7 @@ services:
       - minio_data:/data
 
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-swarm}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-swarm}
@@ -76,6 +76,13 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      # Ollama on host. When OLLAMA_BASE_URL is set (e.g. in .env), use host.docker.internal in Docker (localhost in container = container itself).
+      # Set OLLAMA_BASE_URL= empty in .env to use OpenAI only for this service.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:+http://host.docker.internal:11434}
+      EXTRACTION_MODEL: ${EXTRACTION_MODEL:-qwen3:8b}
+      HF_TOKEN: ${HF_TOKEN:-}
+      GLINER_MODEL: ${GLINER_MODEL:-fastino/gliner2-base-v1}
+      NLI_MODEL: ${NLI_MODEL:-cross-encoder/nli-deberta-v3-small}
 
   feed:
     image: node:20-alpine

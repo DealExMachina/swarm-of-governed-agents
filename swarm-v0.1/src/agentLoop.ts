@@ -1,6 +1,7 @@
 /**
- * Event-driven autonomous agent loop. Subscribe to swarm.events.>, run deterministic
- * filter, self-check OpenFGA, execute agent, publish result, update memory, emit proposal if needed.
+ * Event-driven autonomous agent loop. Pull from swarm.events.> (no push subscription
+ * to avoid NATS "duplicate subscription" when durable consumer is still push_bound).
+ * Run deterministic filter, self-check OpenFGA, execute agent, publish result, update memory, emit proposal if needed.
  */
 
 import { randomUUID } from "crypto";
@@ -30,7 +31,7 @@ function getRunner(spec: AgentSpec): ((s3: S3Client, bucket: string, payload: Re
   return JOB_RUNNERS[spec.jobType] ?? null;
 }
 
-function memoryUpdateFromContext(role: string, context: Record<string, unknown>): Partial<import("./activationFilters.js").AgentMemory> {
+function memoryUpdateFromContext(_role: string, context: Record<string, unknown>): Partial<import("./activationFilters.js").AgentMemory> {
   const now = Date.now();
   const update: Partial<import("./activationFilters.js").AgentMemory> = { lastActivatedAt: now };
   if (typeof context.latestSeq === "number") {
@@ -70,13 +71,15 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     logger.error("no runner for role", { role });
     process.exit(1);
   }
+  const s = spec;
+  const r = runner;
 
   const subject = "swarm.events.>";
   const consumer = `${role}-${agentId}-events`;
 
   await bus.ensureStream(stream, [subject]);
 
-  const sub = await bus.subscribe(stream, subject, consumer, async (msg) => {
+  async function handleMessage(_msg: { id: string; data: Record<string, unknown> }): Promise<void> {
     const startMs = Date.now();
     try {
       const config = await loadFilterConfig(role);
@@ -87,24 +90,30 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         return;
       }
 
-      const permitted = await checkPermission(agentId, "writer", spec.targetNode);
+      const permitted = await checkPermission(agentId, "writer", s.targetNode);
       if (!permitted.allowed) {
-        logger.info("permission denied, skipping", { role, targetNode: spec.targetNode });
+        logger.info("permission denied, skipping", { role, targetNode: s.targetNode });
         return;
       }
 
-      const result = await runner(s3, bucket, activation.context as Record<string, unknown>);
+      const result = await r(s3, bucket, activation.context as Record<string, unknown>);
       const latencyMs = Date.now() - startMs;
       await recordActivation(role, true, latencyMs);
 
+      let payload: Record<string, unknown>;
+      try {
+        payload = JSON.parse(JSON.stringify(result ?? {})) as Record<string, unknown>;
+      } catch {
+        payload = { wrote: [], facts_hash: undefined };
+      }
       await bus.publishEvent(
-        createSwarmEvent(spec.resultEventType, (result ?? {}) as Record<string, unknown>, { source: role }),
+        createSwarmEvent(s.resultEventType, payload, { source: role }),
       );
 
       const memUpdate = memoryUpdateFromContext(role, activation.context);
       await saveAgentMemory(role, memUpdate);
 
-      if (spec.proposesAdvance && spec.advancesTo) {
+      if (s.proposesAdvance && s.advancesTo) {
         const stateBefore = await loadState();
         if (stateBefore) {
           const to = transitions[stateBefore.lastNode];
@@ -112,7 +121,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             proposal_id: randomUUID(),
             agent: agentId,
             proposed_action: "advance_state",
-            target_node: spec.advancesTo,
+            target_node: s.advancesTo,
             payload: {
               expectedEpoch: stateBefore.epoch,
               runId: stateBefore.runId,
@@ -121,15 +130,27 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             },
             mode: "YOLO" as const,
           };
-          await bus.publish(`swarm.proposals.${spec.jobType}`, proposal as unknown as Record<string, string>);
-          logger.info("proposal emitted", { proposal_id: proposal.proposal_id, job_type: spec.jobType });
+          await bus.publish(`swarm.proposals.${s.jobType}`, proposal as unknown as Record<string, string>);
+          logger.info("proposal emitted", { proposal_id: proposal.proposal_id, job_type: s.jobType });
         }
       }
     } catch (err) {
       logger.error("agent loop error", { role, error: toErrorString(err) });
     }
-  });
+  }
 
-  logger.info("agent loop subscribed", { role, subject, consumer });
-  await new Promise<void>(() => {});
+  logger.info("agent loop started (pull)", { role, subject, consumer });
+
+  while (true) {
+    const processed = await bus.consume(
+      stream,
+      subject,
+      consumer,
+      handleMessage,
+      { timeoutMs: 5000, maxMessages: 10 },
+    );
+    if (processed === 0) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
 }

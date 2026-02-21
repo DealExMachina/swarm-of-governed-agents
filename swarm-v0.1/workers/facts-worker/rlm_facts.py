@@ -9,13 +9,11 @@ from pydantic import BaseModel, Field
 
 # -----------------------------
 # DSPy LLM Setup (lazy so tests can run without litellm/openai deps)
-# OpenAI-compatible: OpenAI, OpenRouter, Together, etc.
+# Ollama when OLLAMA_BASE_URL is set; else OpenAI-compatible.
 # -----------------------------
 
 _lm = None
 _program = None
-
-
 _use_openai_fallback = False
 
 
@@ -25,14 +23,20 @@ def _get_lm():
         return _lm
     try:
         from dspy.clients.lm import LM as ConcreteLM
-        _model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        _model_str = f"openai/{_model}" if "/" not in _model else _model
-        _lm_kwargs: Dict[str, Any] = {}
-        if os.getenv("OPENAI_API_KEY"):
-            _lm_kwargs["api_key"] = os.getenv("OPENAI_API_KEY")
-        if os.getenv("OPENAI_BASE_URL"):
-            _lm_kwargs["api_base"] = os.getenv("OPENAI_BASE_URL")
-        _lm = ConcreteLM(model=_model_str, model_type="chat", **_lm_kwargs)
+        ollama_base = os.getenv("OLLAMA_BASE_URL", "").strip()
+        if ollama_base:
+            _model = os.getenv("EXTRACTION_MODEL", "qwen3:8b")
+            _model_str = f"openai/{_model}" if "/" not in _model else _model
+            _lm = ConcreteLM(model=_model_str, model_type="chat", api_base=ollama_base, api_key="ollama")
+        else:
+            _model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            _model_str = f"openai/{_model}" if "/" not in _model else _model
+            _lm_kwargs: Dict[str, Any] = {}
+            if os.getenv("OPENAI_API_KEY"):
+                _lm_kwargs["api_key"] = os.getenv("OPENAI_API_KEY")
+            if os.getenv("OPENAI_BASE_URL"):
+                _lm_kwargs["api_base"] = os.getenv("OPENAI_BASE_URL")
+            _lm = ConcreteLM(model=_model_str, model_type="chat", **_lm_kwargs)
         dspy.settings.configure(lm=_lm)
         return _lm
     except (ImportError, TypeError):
@@ -56,13 +60,18 @@ def _get_program():
 
 
 def _call_openai_fallback(prompt_context: str, prompt_previous: str) -> str:
-    """Use OpenAI client directly when DSPy LM is not available (e.g. in Docker)."""
+    """Use OpenAI client directly when DSPy LM is not available (e.g. in Docker). Uses Ollama when OLLAMA_BASE_URL is set."""
     from openai import OpenAI
-    client = OpenAI(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        base_url=os.getenv("OPENAI_BASE_URL") or None,
-    )
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    ollama_base = os.getenv("OLLAMA_BASE_URL", "").strip()
+    if ollama_base:
+        client = OpenAI(api_key="ollama", base_url=ollama_base)
+        model = os.getenv("EXTRACTION_MODEL", "qwen3:8b")
+    else:
+        client = OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            base_url=os.getenv("OPENAI_BASE_URL") or None,
+        )
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     user_content = f"""Context (recent events as JSON):
 {prompt_context}
 
@@ -126,6 +135,123 @@ class ExtractFacts(dspy.Signature):
 def stable_hash(obj: Any) -> str:
     b = json.dumps(obj, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(b).hexdigest()
+
+
+# -----------------------------
+# GLiNER2 NER (optional first-pass)
+# -----------------------------
+
+_gliner_model = None
+
+
+def _get_gliner():
+    global _gliner_model
+    if _gliner_model is not None:
+        return _gliner_model
+    try:
+        from gliner2 import GLiNER2
+        model_id = os.getenv("GLINER_MODEL", "fastino/gliner2-base-v1")
+        _gliner_model = GLiNER2.from_pretrained(model_id)
+        return _gliner_model
+    except Exception:
+        return None
+
+
+def _extract_entities_gliner(context: List[Dict[str, Any]]) -> List[str]:
+    """First-pass NER on context text. Returns list of entity strings. Empty if GLiNER unavailable."""
+    model = _get_gliner()
+    if model is None:
+        return []
+    text_parts: List[str] = []
+    for ev in context:
+        if not isinstance(ev, dict):
+            continue
+        payload = ev.get("payload") or ev.get("data", {}).get("payload") or ev.get("data") or {}
+        if isinstance(payload, dict):
+            for key in ("content", "text", "excerpt", "body"):
+                v = payload.get(key)
+                if v and isinstance(v, str):
+                    text_parts.append(v[:8000])
+                    break
+        if isinstance(ev.get("payload"), str):
+            text_parts.append(str(ev["payload"])[:8000])
+    if not text_parts:
+        return []
+    text = "\n\n".join(text_parts)[:32000]
+    try:
+        labels = ["person", "organization", "location", "date", "amount", "document", "concept"]
+        raw = model.extract_entities(text, labels) if hasattr(model, "extract_entities") else getattr(model, "predict_entities", lambda t, l: {})(text, labels)
+        seen: set = set()
+        out: List[str] = []
+        if isinstance(raw, dict) and "entities" in raw:
+            for _label, vals in raw["entities"].items():
+                for v in vals if isinstance(vals, list) else []:
+                    s = str(v).strip() if not isinstance(v, dict) else str(v.get("text", v)).strip()
+                    if s and s not in seen:
+                        seen.add(s)
+                        out.append(s)
+        return out
+    except Exception:
+        return []
+
+
+# -----------------------------
+# NLI contradiction detection (optional)
+# -----------------------------
+
+_nli_model = None
+
+
+def _get_nli():
+    global _nli_model
+    if _nli_model is not None:
+        return _nli_model
+    try:
+        from sentence_transformers import CrossEncoder
+        model_id = os.getenv("NLI_MODEL", "cross-encoder/nli-deberta-v3-small")
+        _nli_model = CrossEncoder(model_id)
+        return _nli_model
+    except Exception:
+        return None
+
+
+def _detect_contradictions_nli(claims: List[str], max_pairs: int = 50) -> List[str]:
+    """Run NLI on claim pairs; return list of contradiction descriptions (e.g. 'Claim A vs Claim B')."""
+    model = _get_nli()
+    if model is None or len(claims) < 2:
+        return []
+    # Limit pairs to avoid O(n^2) blow-up
+    pairs: List[Tuple[str, str]] = []
+    for i in range(min(len(claims), 20)):
+        for j in range(i + 1, min(len(claims), 20)):
+            if len(pairs) >= max_pairs:
+                break
+            a, b = claims[i], claims[j]
+            if isinstance(a, str) and isinstance(b, str) and a.strip() and b.strip():
+                pairs.append((a, b))
+        if len(pairs) >= max_pairs:
+            break
+    if not pairs:
+        return []
+    try:
+        from sentence_transformers import CrossEncoder
+        # CrossEncoder returns scores for [contradiction, entailment, neutral] in that order for some models
+        # nli-deberta-v3-small: logits for contradiction, entailment, neutral
+        scores = model.predict([(a, b) for a, b in pairs])
+        out: List[str] = []
+        for idx, (a, b) in enumerate(pairs):
+            s = scores[idx] if hasattr(scores, "__getitem__") else scores
+            if hasattr(s, "tolist"):
+                s = s.tolist()
+            if isinstance(s, (list, tuple)) and len(s) >= 3:
+                # Index 0 = contradiction, 1 = entailment, 2 = neutral
+                if s[0] > s[1] and s[0] > s[2] and s[0] > 0.5:
+                    out.append(f"NLI: \"{a[:100]}...\" vs \"{b[:100]}...\"")
+            elif isinstance(s, (list, tuple)) and len(s) >= 1 and float(s[0]) > 0.5:
+                out.append(f"NLI: \"{a[:100]}...\" vs \"{b[:100]}...\"")
+        return out
+    except Exception:
+        return []
 
 
 def _doc_titles_from_context(context: List[Dict[str, Any]]) -> List[str]:
@@ -214,6 +340,9 @@ def extract_facts_and_drift(
     context: List[Dict[str, Any]],
     previous_facts: Optional[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    # Optional first-pass NER (entities merged into facts after LLM)
+    gliner_entities: List[str] = _extract_entities_gliner(context)
+
     prompt_context = json.dumps(context, indent=2)
     prompt_previous = json.dumps(previous_facts, indent=2) if previous_facts else "{}"
 
@@ -236,6 +365,20 @@ def extract_facts_and_drift(
     facts_dict = json.loads(raw)
 
     facts = Facts(**facts_dict)
+    # Merge GLiNER entities (dedupe)
+    if gliner_entities:
+        existing = set(facts.entities or [])
+        for e in gliner_entities:
+            if e and e not in existing:
+                existing.add(e)
+                facts.entities.append(e)
+
+    # NLI contradiction detection on claim pairs
+    claims = facts.claims or []
+    nli_contradictions = _detect_contradictions_nli(claims)
+    if nli_contradictions:
+        facts.contradictions = list(facts.contradictions or []) + nli_contradictions
+
     facts.updated_at = datetime.utcnow().isoformat() + "Z"
     facts.hash = stable_hash(facts.model_dump())
 

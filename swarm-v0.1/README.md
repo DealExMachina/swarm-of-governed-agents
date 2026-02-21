@@ -153,6 +153,7 @@ export PGPASSWORD="${POSTGRES_PASSWORD:-swarm}"
 psql -h localhost -p 5433 -U "${POSTGRES_USER:-swarm}" -d "${POSTGRES_DB:-swarm}" -f migrations/002_context_wal.sql
 psql -h localhost -p 5433 -U "${POSTGRES_USER:-swarm}" -d "${POSTGRES_DB:-swarm}" -f migrations/003_swarm_state.sql
 psql -h localhost -p 5433 -U "${POSTGRES_USER:-swarm}" -d "${POSTGRES_DB:-swarm}" -f migrations/005_semantic_graph.sql
+psql -h localhost -p 5433 -U "${POSTGRES_USER:-swarm}" -d "${POSTGRES_DB:-swarm}" -f migrations/006_scope_finality_decisions.sql
 ```
 
 **Seed, bootstrap, and launch:**

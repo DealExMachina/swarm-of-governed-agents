@@ -15,11 +15,16 @@ import { makeS3 } from "./s3.js";
 import { s3GetText } from "./s3.js";
 import { toErrorString } from "./errors.js";
 import { loadPolicies, evaluateRules } from "./governance.js";
+import { evaluateFinality, computeGoalScoreForScope, loadFinalityConfig } from "./finalityEvaluator.js";
+import { getGraphSummary, appendResolutionGoal } from "./semanticGraph.js";
+import { getLatestFinalityDecision } from "./finalityDecisions.js";
 
 const FEED_PORT = parseInt(process.env.FEED_PORT ?? "3002", 10);
 const NATS_STREAM = process.env.NATS_STREAM ?? "SWARM_JOBS";
 const S3_BUCKET = process.env.S3_BUCKET ?? null;
 const GOVERNANCE_PATH = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
+const SCOPE_ID = process.env.SCOPE_ID ?? "default";
+const MITL_URL = (process.env.MITL_URL ?? "http://localhost:3001").replace(/\/$/, "");
 
 function getPathname(url: string): string {
   try {
@@ -79,9 +84,92 @@ async function handleAddDoc(req: IncomingMessage, res: ServerResponse): Promise<
       { source: "feed" },
     );
     const seq = await appendEvent(event as unknown as Record<string, unknown>);
+    const bus = await makeEventBus();
+    await bus.publishEvent(event);
+    await bus.close();
     sendJson(res, 200, { seq, ok: true, message: "Document added; facts pipeline will run when agents process it." });
   } catch (e) {
     sendJson(res, 500, { error: toErrorString(e) });
+  }
+}
+
+/** POST /context/resolution: add a manual resolution/decision to the WAL (type resolution). Integrates as new context so facts re-run and drift can clear; graph and fact history record the resolution. */
+async function handleAddResolution(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const body = await readJsonBody(req);
+    const decision = typeof body.decision === "string" ? body.decision : typeof body.text === "string" ? body.text : "";
+    if (!decision.trim()) {
+      sendJson(res, 400, { error: "decision or text required" });
+      return;
+    }
+    const summary = typeof body.summary === "string" ? body.summary : "";
+    const event = createSwarmEvent(
+      "resolution",
+      {
+        decision: decision.trim(),
+        summary: summary.trim() || decision.trim().slice(0, 80),
+        text: decision.trim(),
+        source: "user",
+      },
+      { source: "feed" },
+    );
+    const seq = await appendEvent(event as unknown as Record<string, unknown>);
+    const bus = await makeEventBus();
+    await bus.publishEvent(event);
+    await bus.close();
+    try {
+      await appendResolutionGoal(SCOPE_ID, decision.trim(), summary.trim());
+    } catch (err) {
+      process.stderr.write(
+        `[feed] appendResolutionGoal failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+    sendJson(res, 200, {
+      seq,
+      ok: true,
+      message: "Resolution added to context. Facts pipeline will run; drift may clear. Graph and fact history will record this manual resolution.",
+    });
+  } catch (e) {
+    sendJson(res, 500, { error: toErrorString(e) });
+  }
+}
+
+/** GET /pending: proxy to MITL server pending list (for finality reviews and other proposals). */
+async function handleGetPending(res: ServerResponse): Promise<void> {
+  try {
+    const r = await fetch(`${MITL_URL}/pending`, { method: "GET" });
+    if (!r.ok) {
+      sendJson(res, 502, { error: "mitl_unavailable", pending: [] });
+      return;
+    }
+    const data = (await r.json()) as { pending?: Array<{ proposal_id: string; proposal: Record<string, unknown> }> };
+    sendJson(res, 200, { pending: data.pending ?? [] });
+  } catch (e) {
+    sendJson(res, 502, { error: toErrorString(e), pending: [] });
+  }
+}
+
+/** POST /finality-response: proxy to MITL finality-response for a given proposal. Body: { proposal_id, option, days? }. */
+async function handleFinalityResponse(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const body = await readJsonBody(req);
+    const proposalId = typeof body.proposal_id === "string" ? body.proposal_id : "";
+    const option = body.option as string | undefined;
+    const valid: string[] = ["approve_finality", "provide_resolution", "escalate", "defer"];
+    if (!proposalId || !option || !valid.includes(option)) {
+      sendJson(res, 400, { ok: false, error: "proposal_id and option (one of: " + valid.join(", ") + ") required" });
+      return;
+    }
+    const days = option === "defer" && body.days != null ? Number(body.days) : undefined;
+    const r = await fetch(`${MITL_URL}/finality-response/${encodeURIComponent(proposalId)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ option, days }),
+    });
+    const data = (await r.json()) as { ok?: boolean; error?: string };
+    sendJson(res, r.ok ? 200 : 404, data);
+  } catch (e) {
+    sendJson(res, 502, { ok: false, error: toErrorString(e) });
   }
 }
 
@@ -131,7 +219,7 @@ async function handleSummary(res: ServerResponse): Promise<void> {
         return { level, types, notes, suggested_actions, references };
       })(),
       what_changed: recent
-        .filter((e) => ["state_transition", "facts_extracted", "drift_analyzed", "context_doc", "bootstrap"].includes((e.data as { type?: string })?.type ?? ""))
+        .filter((e) => ["state_transition", "facts_extracted", "drift_analyzed", "context_doc", "bootstrap", "resolution"].includes((e.data as { type?: string })?.type ?? ""))
         .slice(-10)
         .map((e) => ({
           seq: e.seq,
@@ -139,6 +227,42 @@ async function handleSummary(res: ServerResponse): Promise<void> {
           ts: e.ts,
           payload: (e.data as { payload?: Record<string, unknown> }).payload ?? {},
         })),
+      finality: await (async () => {
+        try {
+          const config = loadFinalityConfig();
+          const near = config.goal_gradient?.near_finality_threshold ?? 0.75;
+          const auto = config.goal_gradient?.auto_finality_threshold ?? 0.92;
+          const goal_score = await computeGoalScoreForScope(SCOPE_ID);
+          const result = await evaluateFinality(SCOPE_ID);
+          const status = result?.kind === "status" ? result.status : result?.kind === "review" ? "near_finality" : "ACTIVE";
+          let last_decision: { option: string; created_at: string } | null = null;
+          try {
+            const decision = await getLatestFinalityDecision(SCOPE_ID);
+            if (decision) last_decision = { option: decision.option, created_at: decision.created_at };
+          } catch {
+            // table may not exist
+          }
+          return {
+            goal_score: Math.round(goal_score * 100) / 100,
+            status,
+            near_threshold: near,
+            auto_threshold: auto,
+            resolved: status === "RESOLVED",
+            dimension_breakdown: result?.kind === "review" ? result.request.dimension_breakdown : null,
+            blockers: result?.kind === "review" ? result.request.blockers : null,
+            last_decision: last_decision ?? undefined,
+          };
+        } catch {
+          return null;
+        }
+      })(),
+      state_graph: await (async () => {
+        try {
+          return await getGraphSummary(SCOPE_ID);
+        } catch {
+          return null;
+        }
+      })(),
     };
     sendJson(res, 200, summary);
   } catch (e) {
@@ -321,6 +445,7 @@ const INDEX_HTML = `<!DOCTYPE html>
     #events li.facts_extracted { border-left-color: #22c55e; }
     #events li.drift_analyzed { border-left-color: #eab308; }
     #events li.context_doc { border-left-color: var(--muted); }
+    #events li.resolution { border-left-color: #a78bfa; }
     #events li .payload {
       margin-top: 0.5rem;
       padding: 0.5rem;
@@ -332,11 +457,26 @@ const INDEX_HTML = `<!DOCTYPE html>
       overflow-y: auto;
     }
     #status { color: var(--muted); font-size: 0.75rem; margin-top: 0.5rem; }
+    .resolution-form { margin-top: 1rem; }
+    .resolution-form .label { font-size: 0.75rem; color: var(--muted); margin-bottom: 0.25rem; display: block; }
+    .resolution-form textarea, .resolution-form input { width: 100%; max-width: 100%; padding: 0.5rem 0.75rem; font-family: var(--font); font-size: 0.875rem; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); margin-bottom: 0.75rem; box-sizing: border-box; }
+    .resolution-form textarea { min-height: 4rem; resize: vertical; }
+    .resolution-form .hint { font-size: 0.75rem; color: var(--muted); margin-top: -0.5rem; margin-bottom: 0.5rem; }
+    .resolution-form .msg { font-size: 0.8125rem; margin-top: 0.5rem; }
+    .resolution-form .msg.success { color: #22c55e; }
+    .resolution-form .msg.error { color: #ef4444; }
     .what-changed { font-size: 0.8125rem; }
     .what-changed .event { padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
     .what-changed .event:last-child { border-bottom: none; }
     .what-changed .event-type { font-weight: 500; color: var(--accent); }
     .what-changed .event-ts { color: var(--muted); font-size: 0.75rem; }
+    .what-changed .event { cursor: pointer; }
+    .what-changed .event-details { margin-top: 0.5rem; padding: 0.5rem; background: var(--bg); border-radius: 4px; font-size: 0.75rem; white-space: pre-wrap; word-break: break-word; }
+    .finality-card .value.resolved { color: #22c55e; }
+    .finality-card .value.near { color: #eab308; }
+    .finality-card .value.active { color: var(--muted); }
+    .dimension-breakdown, .blockers-list { font-size: 0.8125rem; margin-top: 0.5rem; }
+    .state-graph table { font-size: 0.8125rem; width: 100%; }
   </style>
 </head>
 <body>
@@ -352,6 +492,26 @@ const INDEX_HTML = `<!DOCTYPE html>
     <section class="section" id="summarySection">
       <h2>Summary</h2>
       <div id="summaryContent" class="summary-loading">Loading…</div>
+    </section>
+
+    <section class="section">
+      <h2>Add resolution</h2>
+      <p class="resolution-form hint">Add a manual decision so it is integrated into context. The pipeline will re-run and drift may clear. The graph and fact history will record this resolution.</p>
+      <form id="resolutionForm" class="resolution-form">
+        <label class="label" for="resolutionDecision">Decision</label>
+        <textarea id="resolutionDecision" name="decision" placeholder="e.g. We decided to change the 20+ engineer hire target to 15+. This is the official resolution." required></textarea>
+        <label class="label" for="resolutionSummary">Summary (optional)</label>
+        <input type="text" id="resolutionSummary" name="summary" placeholder="e.g. Hiring target aligned to 15+">
+        <button class="btn" type="submit">Submit resolution</button>
+        <div id="resolutionMsg" class="msg" aria-live="polite"></div>
+      </form>
+    </section>
+
+    <section class="section" id="pendingSection">
+      <h2>Pending reviews</h2>
+      <p id="pendingStatus">Loading…</p>
+      <div id="pendingList"></div>
+      <button class="btn secondary" id="refreshPending" type="button">Refresh</button>
     </section>
 
     <section class="section events-wrap">
@@ -372,6 +532,33 @@ const INDEX_HTML = `<!DOCTYPE html>
         let html = '<div class="grid">';
         if (s) {
           html += '<div class="card"><div class="label">State</div><div class="value">' + escapeHtml(s.lastNode) + '</div><div class="label">Epoch ' + s.epoch + ' · ' + (s.updatedAt || '').slice(0, 19) + '</div></div>';
+        }
+        if (data.finality) {
+          var fin = data.finality;
+          var statusClass = (fin.status === 'RESOLVED' ? 'resolved' : fin.status === 'near_finality' ? 'near' : 'active');
+          html += '<div class="card finality-card" style="grid-column: 1 / -1;"><div class="label">Finality (confidence)</div><div class="value ' + statusClass + '">' + escapeHtml(fin.status) + (fin.resolved ? ' (final)' : '') + '</div><div class="label">Goal score ' + (fin.goal_score != null ? (fin.goal_score * 100).toFixed(1) + '%' : '—') + ' · near ' + (fin.near_threshold != null ? (fin.near_threshold * 100) + '%' : '—') + ' · auto ' + (fin.auto_threshold != null ? (fin.auto_threshold * 100) + '%' : '—') + '</div>';
+          if (fin.last_decision && fin.last_decision.option) {
+            html += '<div class="label" style="margin-top: 0.25rem;">Last human decision: ' + escapeHtml(fin.last_decision.option) + (fin.last_decision.created_at ? ' at ' + escapeHtml(String(fin.last_decision.created_at).slice(0, 19)) : '') + '</div>';
+          }
+          if (fin.dimension_breakdown && fin.dimension_breakdown.length) {
+            html += '<details class="dimension-breakdown"><summary>Dimension breakdown</summary><ul>';
+            fin.dimension_breakdown.forEach(function(d) {
+              html += '<li>' + escapeHtml(d.name) + ': ' + (d.score != null ? (d.score * 100).toFixed(0) + '%' : '') + ' ' + escapeHtml(d.detail || '') + ' (' + escapeHtml(d.status || '') + ')</li>';
+            });
+            html += '</ul></details>';
+          }
+          if (fin.blockers && fin.blockers.length) {
+            html += '<details class="blockers-list"><summary>Blockers</summary><ul>';
+            fin.blockers.forEach(function(b) {
+              html += '<li>' + escapeHtml(b.type || '') + ': ' + escapeHtml(b.description || '') + '</li>';
+            });
+            html += '</ul></details>';
+          }
+          html += '</div>';
+        }
+        if (data.state_graph) {
+          var g = data.state_graph;
+          html += '<div class="card state-graph" style="grid-column: 1 / -1;"><div class="label">State graph (supporting)</div><table><tr><th>Nodes</th><td>' + (Object.keys(g.nodes || {}).length ? Object.entries(g.nodes).map(function(e) { return escapeHtml(e[0]) + ': ' + e[1]; }).join(' · ') : '—') + '</td></tr><tr><th>Edges</th><td>' + (Object.keys(g.edges || {}).length ? Object.entries(g.edges).map(function(e) { return escapeHtml(e[0]) + ': ' + e[1]; }).join(' · ') : '—') + '</td></tr></table></div>';
         }
         if (d) {
           const levelClass = (d.level === 'high' ? 'high' : d.level === 'medium' ? 'mid' : '');
@@ -402,13 +589,28 @@ const INDEX_HTML = `<!DOCTYPE html>
         }
         html += '</div>';
         if (w.length) {
-          html += '<h2 style="margin-top: 1rem;">Recent changes</h2><div class="what-changed">';
-          w.forEach(function(ev) {
-            html += '<div class="event"><span class="event-type">' + escapeHtml(ev.type || '') + '</span> <span class="event-ts">' + (ev.ts || '').slice(0, 19) + '</span> seq ' + ev.seq + '</div>';
+          html += '<h2 style="margin-top: 1rem;">Recent changes (click to unfold)</h2><div class="what-changed">';
+          w.forEach(function(ev, idx) {
+            var payloadStr = ev.payload && Object.keys(ev.payload).length ? JSON.stringify(ev.payload, null, 2) : '';
+            var id = 'ev-' + idx;
+            html += '<div class="event" data-id="' + id + '" role="button" tabindex="0" aria-expanded="false"><span class="event-type">' + escapeHtml(ev.type || '') + '</span> <span class="event-ts">' + (ev.ts || '').slice(0, 19) + '</span> seq ' + ev.seq + (payloadStr ? ' <span class="label">(details)</span>' : '') + '</div>';
+            if (payloadStr) html += '<pre class="event-details" id="' + id + '" hidden>' + escapeHtml(payloadStr) + '</pre>';
           });
           html += '</div>';
         }
         summaryContent.innerHTML = html;
+        var events = summaryContent.querySelectorAll('.what-changed .event[data-id]');
+        events.forEach(function(el) {
+          el.addEventListener('click', function() {
+            var id = el.getAttribute('data-id');
+            var details = id ? summaryContent.querySelector('#' + id) : null;
+            if (details) {
+              var open = details.hidden;
+              details.hidden = !open;
+              el.setAttribute('aria-expanded', open ? 'true' : 'false');
+            }
+          });
+        });
       }
       function escapeHtml(str) {
         if (str == null) return '';
@@ -428,6 +630,114 @@ const INDEX_HTML = `<!DOCTYPE html>
       }
       refreshBtn.addEventListener('click', loadSummary);
       loadSummary();
+
+      var pendingList = document.getElementById('pendingList');
+      var pendingStatus = document.getElementById('pendingStatus');
+      var refreshPendingBtn = document.getElementById('refreshPending');
+      function loadPending() {
+        if (!pendingStatus) return;
+        pendingStatus.textContent = 'Loading…';
+        fetch('/pending').then(function(r) { return r.json(); }).then(function(data) {
+          var list = data.pending || [];
+          if (!pendingStatus) return;
+          pendingStatus.textContent = list.length ? list.length + ' pending' : 'No pending reviews';
+          if (!pendingList) return;
+          pendingList.innerHTML = '';
+          list.forEach(function(item) {
+            var pid = item.proposal_id;
+            var prop = item.proposal || {};
+            var payload = prop.payload || {};
+            if (payload.type !== 'finality_review' && prop.proposed_action !== 'finality_review') return;
+            var scopeId = payload.scope_id || '—';
+            var goalScore = payload.goal_score != null ? (payload.goal_score * 100).toFixed(1) + '%' : '—';
+            var blockers = Array.isArray(payload.blockers) ? payload.blockers : [];
+            var card = document.createElement('div');
+            card.className = 'card pending-review-card';
+            card.style.cssText = 'grid-column: 1 / -1; margin-bottom: 0.75rem;';
+            var blockerHtml = blockers.length ? '<ul class="blockers-list">' + blockers.map(function(b) { return '<li>' + escapeHtml(b.type || '') + ': ' + escapeHtml(b.description || '') + '</li>'; }).join('') + '</ul>' : '';
+            card.innerHTML = '<div class="label">' + escapeHtml(pid) + ' · scope ' + escapeHtml(scopeId) + ' · goal score ' + escapeHtml(goalScore) + '</div>' + blockerHtml + '<div class="pending-actions" style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;"></div>';
+            var actions = card.querySelector('.pending-actions');
+            ['approve_finality', 'provide_resolution', 'escalate', 'defer'].forEach(function(opt) {
+              var btn = document.createElement('button');
+              btn.className = 'btn secondary';
+              btn.type = 'button';
+              btn.textContent = opt === 'approve_finality' ? 'Approve finality' : opt === 'provide_resolution' ? 'Provide resolution' : opt === 'escalate' ? 'Escalate' : 'Defer';
+              if (opt === 'defer') {
+                var wrap = document.createElement('span');
+                wrap.style.display = 'inline-flex';
+                wrap.style.gap = '0.25rem';
+                wrap.style.alignItems = 'center';
+                var inp = document.createElement('input');
+                inp.type = 'number';
+                inp.min = '1';
+                inp.value = '7';
+                inp.style.width = '3rem';
+                inp.style.padding = '0.25rem';
+                wrap.appendChild(btn);
+                wrap.appendChild(document.createTextNode(' days'));
+                wrap.appendChild(inp);
+                btn = wrap;
+                var realBtn = wrap.querySelector('button');
+                (realBtn || btn).addEventListener('click', function() {
+                  var days = parseInt(inp.value, 10) || 7;
+                  fetch('/finality-response', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ proposal_id: pid, option: 'defer', days: days }) }).then(function(r) { return r.json(); }).then(function(result) {
+                    if (result.ok) { loadPending(); loadSummary(); } else { alert(result.error || 'Failed'); }
+                  }).catch(function(e) { alert(e.message || 'Request failed'); });
+                });
+                actions.appendChild(wrap);
+                return;
+              }
+              btn.addEventListener('click', function() {
+                fetch('/finality-response', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ proposal_id: pid, option: opt }) }).then(function(r) { return r.json(); }).then(function(result) {
+                  if (result.ok) { loadPending(); loadSummary(); } else { alert(result.error || 'Failed'); }
+                }).catch(function(e) { alert(e.message || 'Request failed'); });
+              });
+              actions.appendChild(btn);
+            });
+            pendingList.appendChild(card);
+          });
+        }).catch(function(e) {
+          if (pendingStatus) pendingStatus.textContent = 'Error: ' + e.message;
+          if (pendingList) pendingList.innerHTML = '';
+        });
+      }
+      if (refreshPendingBtn) refreshPendingBtn.addEventListener('click', loadPending);
+      loadPending();
+
+      var resolutionForm = document.getElementById('resolutionForm');
+      var resolutionMsg = document.getElementById('resolutionMsg');
+      if (resolutionForm && resolutionMsg) {
+        resolutionForm.addEventListener('submit', function(e) {
+          e.preventDefault();
+          var decision = document.getElementById('resolutionDecision');
+          var summary = document.getElementById('resolutionSummary');
+          var dec = decision && decision.value ? decision.value.trim() : '';
+          if (!dec) { resolutionMsg.textContent = 'Enter a decision.'; resolutionMsg.className = 'msg error'; return; }
+          resolutionMsg.textContent = 'Sending…';
+          resolutionMsg.className = 'msg';
+          fetch('/context/resolution', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: dec, summary: summary && summary.value ? summary.value.trim() : '' })
+          }).then(function(r) {
+            return r.json().then(function(data) {
+              if (r.ok) {
+                resolutionMsg.textContent = data.message || 'Resolution added. Refresh summary to see updates.';
+                resolutionMsg.className = 'msg success';
+                if (decision) decision.value = '';
+                if (summary) summary.value = '';
+                loadSummary();
+              } else {
+                resolutionMsg.textContent = data.error || 'Request failed.';
+                resolutionMsg.className = 'msg error';
+              }
+            });
+          }).catch(function(err) {
+            resolutionMsg.textContent = err.message || 'Request failed.';
+            resolutionMsg.className = 'msg error';
+          });
+        });
+      }
 
       var ul = document.getElementById('events');
       var status = document.getElementById('status');
@@ -476,6 +786,18 @@ async function main(): Promise<void> {
       }
       if (req.method === "POST" && pathname === "/context/docs") {
         await handleAddDoc(req, res);
+        return;
+      }
+      if (req.method === "POST" && pathname === "/context/resolution") {
+        await handleAddResolution(req, res);
+        return;
+      }
+      if (req.method === "GET" && pathname === "/pending") {
+        await handleGetPending(res);
+        return;
+      }
+      if (req.method === "POST" && pathname === "/finality-response") {
+        await handleFinalityResponse(req, res);
         return;
       }
       await handleEvents(req, res);

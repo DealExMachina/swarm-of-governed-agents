@@ -3,6 +3,7 @@ import { createTool } from "@mastra/core/tools";
 import { Agent } from "@mastra/core/agent";
 import { z } from "zod";
 import { logger } from "../logger.js";
+import { toErrorString } from "../errors.js";
 import { s3GetText, s3PutJson } from "../s3.js";
 import { tailEvents } from "../contextWal.js";
 
@@ -69,7 +70,7 @@ function createFactsTools(
 
   const writeFactsTool = createTool({
     id: "writeFacts",
-    description: "Write extracted facts and drift to storage (S3).",
+    description: "Write extracted facts and drift to storage (S3) and sync facts to the semantic graph.",
     inputSchema: z.object({
       facts: z.record(z.unknown()),
       drift: z.record(z.unknown()),
@@ -86,6 +87,18 @@ function createFactsTools(
       const wrote = [KEY_FACTS, KEY_DRIFT, KEY_FACTS_HIST(ts)];
       const facts_hash = (context.facts as { hash?: string })?.hash;
       lastWriteResult.current = { wrote, facts_hash };
+
+      const scopeId = process.env.SCOPE_ID ?? "default";
+      try {
+        const factsPayload = JSON.parse(JSON.stringify(context.facts ?? {})) as Record<string, unknown>;
+        const { syncFactsToSemanticGraph } = await import("../factsToSemanticGraph.js");
+        await syncFactsToSemanticGraph(scopeId, factsPayload, {
+          embedClaims: process.env.FACTS_SYNC_EMBED === "1",
+        });
+      } catch (e) {
+        logger.warn("writeFacts: semantic graph sync failed", { scopeId, error: toErrorString(e) });
+      }
+
       return { wrote, facts_hash };
     },
   });
@@ -151,7 +164,11 @@ export async function runFactsPipelineDirect(
   const r1 = await exec(readContextTool as unknown as ExecTool, { limit: 200 });
   const r2 = await exec(extractFactsTool as unknown as ExecTool, r1);
   await exec(writeFactsTool as unknown as ExecTool, r2);
-  return lastWriteResult.current ?? { wrote: [], facts_hash: undefined };
+  const last = lastWriteResult.current;
+  return {
+    wrote: Array.isArray(last?.wrote) ? [...last.wrote] : [],
+    facts_hash: typeof last?.facts_hash === "string" ? last.facts_hash : undefined,
+  };
 }
 
 /**

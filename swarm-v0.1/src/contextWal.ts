@@ -102,9 +102,9 @@ const PIPELINE_EVENT_TYPES = [
 
 /**
  * Event types that represent new context for the facts agent. Facts run only when one of these
- * appears in the WAL, so the loop suspends after a full cycle until new docs or bootstrap.
+ * appears in the WAL, so the loop suspends after a full cycle until new docs, bootstrap, or a manual resolution.
  */
-const PIPELINE_EVENT_TYPES_FOR_FACTS = ["bootstrap", "context_doc"];
+const PIPELINE_EVENT_TYPES_FOR_FACTS = ["bootstrap", "context_doc", "resolution"];
 
 /**
  * Returns the latest WAL seq among events that represent pipeline progress (not governance decisions).
