@@ -1,0 +1,41 @@
+PROJECT HORIZON — FINANCIAL DUE DILIGENCE REPORT
+
+Prepared by: Financial Advisory Practice
+Date: 2025-10-14
+Classification: CONFIDENTIAL — PRIVILEGED
+
+EXECUTIVE SUMMARY
+
+A review of NovaTech AG's financial records for FY 2024 reveals material discrepancies relative to the initial analyst briefing. ARR as reported by management understates deferred revenue adjustments. Adjusted ARR is €38M, not the €50M previously stated by management. This represents a 24% overstatement with direct valuation implications.
+
+KEY FINDINGS
+
+1. ARR DISCREPANCY
+
+Management-reported ARR of €50M includes approximately €12M in multi-year contracts where revenue was front-loaded into FY 2024 in a manner inconsistent with ASC 606 / IFRS 15 standards. Under standard SaaS accounting, adjusted ARR stands at €38M. The €12M gap has material implications for the proposed valuation of €420M, which was based on the stated 8.4x ARR multiple.
+
+2. DEFERRED REVENUE IRREGULARITY
+
+Three enterprise contracts totaling €7.2M were fully recognized in FY 2024 despite delivery obligations extending into FY 2025 and FY 2026. The accounting treatment appears to have been applied selectively to maximize current-year revenue metrics ahead of the acquisition process. The external audit for FY 2024 has not yet been completed. Management confirmed that Ernst & Young engagement is pending as of October 2025.
+
+3. IP OWNERSHIP DISPUTE
+
+Two of the seven patents listed in the initial briefing (EP3847291 and EP3901445) are subject to co-ownership claims by Dr. Klaus Haber, a founding technical advisor who departed in 2023 following a compensation dispute. Legal proceedings are currently in a preliminary phase. The company has not disclosed this dispute in any investor or acquisition materials provided to us.
+
+This directly contradicts the initial briefing claim that NovaTech AG holds 7 granted patents without encumbrance.
+
+4. GROSS MARGIN RESTATEMENT
+
+Adjusting for capitalized R&D costs incorrectly classified as COGS offsets, gross margin is revised downward from 72% to approximately 66%. This is still healthy but further reduces the quality of earnings narrative.
+
+RISK ASSESSMENT
+
+- Revenue risk: HIGH. €12M ARR overstatement materially affects valuation baseline.
+- IP risk: HIGH. Two core patents have contested ownership; both are central to the PCO product.
+- Process risk: MEDIUM. Absence of completed external audit at this stage of an acquisition process is a governance concern.
+
+CONCLUSION
+
+The financial profile of NovaTech AG is materially weaker than represented in the initial briefing. We recommend halting the current process pending: (1) independent auditor completion and sign-off, (2) resolution of the IP co-ownership claim with Dr. Haber, and (3) written management response to the deferred revenue treatment.
+
+Indicative revised valuation: €285M–€320M (7.5x–8.4x adjusted ARR of €38M), subject to IP resolution. The original offer range of €400M–€430M is no longer supported by the financial evidence.

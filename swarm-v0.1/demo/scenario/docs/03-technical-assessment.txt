@@ -1,0 +1,41 @@
+PROJECT HORIZON — TECHNICAL DUE DILIGENCE SUMMARY
+
+Prepared by: Technology Advisory Group
+Date: 2025-10-18
+Classification: CONFIDENTIAL
+
+OVERVIEW
+
+The technical due diligence assessment was conducted over 10 working days, including code review (3 repositories), infrastructure architecture review, and structured interviews with the engineering leadership and three senior engineers. The engagement was cooperative. NovaTech AG provided full access to source code, deployment configurations, and incident history.
+
+TECHNOLOGY ASSESSMENT
+
+PharmaChain Optimizer (PCO) is built on a microservices architecture (Go, PostgreSQL, Apache Kafka). The codebase demonstrates strong engineering discipline: unit test coverage at 78%, CI/CD pipeline in production via GitHub Actions, infrastructure managed as code via Terraform. The core supply chain traceability module is technically differentiated and would require 18–24 months for a competitor to replicate from scratch.
+
+The system handles approximately 2.4M regulatory compliance events per day across client deployments. Uptime SLA for FY 2024 was 99.7%, with no critical outages. The architecture is cloud-agnostic and currently deployed on AWS with active experimentation on Azure for one EU-regulated client.
+
+RISK ASSESSMENT
+
+1. TALENT CONCENTRATION RISK — SEVERITY: HIGH
+
+Dr. Yuki Tanaka, the CTO and lead architect of the core traceability engine, has accepted an offer at Nexion GmbH (a direct competitor) and will depart in December 2025. Two of the three most senior engineers — who constitute the original founding technical team — have submitted resignation notices effective Q1 2026. Combined, these three individuals are the documented authors of approximately 61% of the core PCO codebase, as measured by commit attribution.
+
+Knowledge transfer documentation is sparse. The CTO has not initiated a handoff plan. No succession candidate has been identified internally.
+
+This is a critical risk that directly threatens the technical value thesis of the acquisition. Without intervention, the acquirer would assume a technology asset whose primary authors are contractually committed to leave within 90 days of deal close.
+
+2. REGULATORY COMPLIANCE DEBT — SEVERITY: MEDIUM
+
+The cold-chain compliance module has not been updated since Q3 2023. Upcoming EU Medical Device Regulation (EU MDR) amendments, effective July 2026, will require significant rework to the compliance event schema and audit trail format. NovaTech AG's engineering team estimated 6–9 months of dedicated effort. This was not factored into any financial projections or valuation materials.
+
+3. THIRD-PARTY DATA DEPENDENCY — SEVERITY: LOW-MEDIUM
+
+PCO relies on three external data providers for real-time regulatory feed ingestion (EMA, BfArM, and a private Swiss provider). Two of these providers have month-to-month contracts with NovaTech AG. Pricing reviews are pending for both. One provider has indicated it is in advanced discussions with Axion Corp (a direct competitor) for an exclusivity arrangement.
+
+CONCLUSION
+
+The core technology is sound and technically differentiated. The PCO architecture is a genuine asset. However, the imminent departure of the CTO and two founding engineers creates a knowledge concentration risk that is existential to the technical valuation premium.
+
+Recommended actions before deal close: (1) negotiate retention packages for Dr. Tanaka and the two senior engineers (estimated cost €1.2M–€1.8M), (2) mandate a structured knowledge transfer program of no less than 60 days, (3) budget €2M–€3M for EU MDR compliance remediation in 2026.
+
+These costs should be factored into the revised valuation guidance.

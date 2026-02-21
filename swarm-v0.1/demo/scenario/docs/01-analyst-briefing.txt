@@ -1,0 +1,40 @@
+PROJECT HORIZON — INITIAL ANALYST BRIEFING
+
+Prepared by: Corporate Development Team
+Date: 2025-10-03
+Classification: CONFIDENTIAL
+
+EXECUTIVE SUMMARY
+
+NovaTech AG is a B2B SaaS company specializing in supply chain optimization for the pharmaceutical sector. Following three years of sustained growth, the company is positioned as a potential acquisition target at an indicative valuation of €420M.
+
+COMPANY OVERVIEW
+
+Founded in 2021, NovaTech AG operates primarily in Germany, the Netherlands, and Switzerland. It serves 47 enterprise clients, including three Top-20 pharmaceutical manufacturers. Annual Recurring Revenue (ARR) was reported at €50M for fiscal year 2024, representing a 3-year CAGR of 45%. Gross margins are reported at 72%.
+
+The core product, PharmaChain Optimizer (PCO), is protected by a portfolio of 7 patents across supply chain traceability and cold-chain logistics compliance. The company has 2 additional patents pending with the European Patent Office.
+
+STRATEGIC FIT
+
+NovaTech AG's regulatory compliance capabilities are highly complementary to our existing distribution network. Integration would accelerate our own compliance roadmap by approximately 18 months and provide immediate access to 12 whitespace accounts in our target segments.
+
+KEY CLAIMS
+
+- ARR: €50M (FY 2024, self-reported)
+- ARR growth rate: 45% CAGR (2021–2024)
+- Gross margin: 72% (self-reported)
+- Client count: 47 enterprise clients
+- Patents: 7 granted, 2 pending (European Patent Office)
+- Indicative valuation: €420M at 8.4x ARR multiple
+
+GOALS FOR PHASE 2 DUE DILIGENCE
+
+- Validate ARR and revenue recognition methodology
+- Confirm IP ownership and freedom to operate
+- Assess technical team depth and talent retention risk
+- Evaluate regulatory compliance posture (SOC 2, GDPR, EU MDR)
+- Complete financial, technical, legal, and commercial due diligence by end of Q4 2025
+
+RECOMMENDATION
+
+Proceed to Phase 2 due diligence. Initial risk profile is low. No material concerns identified at this stage. Indicative offer range: €400M–€430M pending confirmatory diligence.

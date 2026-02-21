@@ -16,6 +16,20 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
+echo "Ensuring S3 bucket..."
+node --loader ts-node/esm scripts/ensure-bucket.ts
+if [ $? -ne 0 ]; then
+  echo "ensure-bucket failed. Exiting."
+  exit 1
+fi
+
+echo "Ensuring DB schema (migrations)..."
+node --loader ts-node/esm scripts/ensure-schema.ts
+if [ $? -ne 0 ]; then
+  echo "ensure-schema failed (check DATABASE_URL and Postgres). Exiting."
+  exit 1
+fi
+
 echo "Ensuring NATS stream..."
 node --loader ts-node/esm scripts/ensure-stream.ts
 if [ $? -ne 0 ]; then

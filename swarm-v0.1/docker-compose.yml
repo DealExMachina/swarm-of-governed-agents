@@ -81,8 +81,8 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:+http://host.docker.internal:11434}
       EXTRACTION_MODEL: ${EXTRACTION_MODEL:-qwen3:8b}
       HF_TOKEN: ${HF_TOKEN:-}
-      GLINER_MODEL: ${GLINER_MODEL:-fastino/gliner2-base-v1}
-      NLI_MODEL: ${NLI_MODEL:-cross-encoder/nli-deberta-v3-small}
+      GLINER_MODEL: ${GLINER_MODEL:-}
+      NLI_MODEL: ${NLI_MODEL:-}
 
   feed:
     image: node:20-alpine

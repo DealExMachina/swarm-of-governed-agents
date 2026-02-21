@@ -22,7 +22,16 @@ import { makeReadGovernanceRulesTool } from "./sharedTools.js";
 export interface DeterministicResult {
   outcome: "approve" | "reject" | "pending" | "ignore";
   reason: string;
-  actionPayload?: { expectedEpoch: number; runId: string; from: string; to: string };
+  actionPayload?: {
+    expectedEpoch: number;
+    runId: string;
+    from: string;
+    to: string;
+    type?: string;
+    drift_level?: string;
+    drift_types?: string[];
+    block_reason?: string;
+  };
 }
 
 /**
@@ -422,10 +431,22 @@ export async function evaluateProposalDeterministic(
 
   const decision = canTransition(from, to, drift, governance);
   if (!decision.allowed) {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'governanceAgent:evaluateProposal',message:'drift-block-escalated-to-HITL',data:{from,to,drift_level:drift.level,drift_types:drift.types,reason:decision.reason,expectedEpoch},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     return {
-      outcome: "reject",
+      outcome: "pending",
       reason: decision.reason,
-      actionPayload: { expectedEpoch, runId: state.runId, from, to },
+      actionPayload: {
+        expectedEpoch,
+        runId: state.runId,
+        from,
+        to,
+        type: "governance_review",
+        drift_level: drift.level,
+        drift_types: drift.types,
+        block_reason: decision.reason,
+      },
     };
   }
 

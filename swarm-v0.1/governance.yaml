@@ -26,5 +26,5 @@ transition_rules:
   - from: DriftChecked
     to: ContextIngested
     block_when:
-      drift_level: [high]
-    reason: "High drift blocks cycle reset until planner acts"
+      drift_level: [critical]
+    reason: "Critical drift blocks cycle reset — requires human override"

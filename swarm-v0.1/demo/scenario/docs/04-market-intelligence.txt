@@ -1,0 +1,38 @@
+PROJECT HORIZON — MARKET INTELLIGENCE UPDATE
+
+Source: External Counsel + Competitive Intelligence Unit
+Date: 2025-10-22
+Classification: CONFIDENTIAL
+
+PATENT LITIGATION ALERT
+
+Axion Corp (NASDAQ: AXIO), a direct competitor in pharmaceutical supply chain software, filed a patent infringement suit against NovaTech AG on 2025-10-15 at the Regional Court of Munich. The complaint includes three independent claims:
+
+- Claim 1: Axion EP3672891 (supply chain traceability algorithms) — NovaTech patent EP3847291 allegedly infringes on methods described in Axion's prior art.
+- Claim 2: Axion EP3789124 (cold-chain monitoring methodology) — contested overlap with NovaTech's cold-chain module implementation.
+- Claim 3: Axion EP3910221 (regulatory compliance reporting structure) — contested overlap with NovaTech's event schema.
+
+NovaTech AG's legal counsel has confirmed the lawsuit is active and that a response brief is due by November 30, 2025. NovaTech AG disputes all three claims. This litigation was not disclosed in any materials provided to the acquisition team and was not mentioned in management interviews.
+
+This is notable because NovaTech patent EP3847291 is also the subject of the co-ownership dispute with Dr. Klaus Haber identified in the financial due diligence report. The same patent is now under attack from two independent directions simultaneously.
+
+CUSTOMER RENEWAL RISK
+
+PharmaCo International, NovaTech AG's largest client at €8.2M ARR (representing 21.6% of adjusted ARR of €38M), has its renewal due in February 2026. Conversations with PharmaCo's procurement team confirm they are actively evaluating alternatives, including Axion Corp's Pharma Supply Suite. A loss of this contract would reduce NovaTech AG's adjusted ARR to approximately €29.8M.
+
+COMPETITIVE CONTEXT
+
+Axion Corp has filed 14 patent infringement suits against competitors in the pharmaceutical supply chain sector over the past 24 months. In 11 of the 14 prior cases, out-of-court settlements were reached with licensing fees ranging from 3%–8% of ARR per year. The median time-to-settlement was 8 months. In two cases where the defendant had a weak IP position, Axion succeeded in obtaining injunctions that effectively ended product distribution.
+
+ASSESSMENT
+
+The combination of the Axion Corp lawsuit and the pre-existing IP co-ownership dispute creates a compound IP risk that was not visible at the time of the initial analyst briefing. The risk profile has materially worsened since Phase 1. The PharmaCo renewal uncertainty adds revenue concentration risk on top of the already-revised ARR figure.
+
+Goals that appeared achievable at Phase 1 — validate IP ownership, confirm ARR, complete diligence by Q4 2025 — are now blocked pending legal analysis. The diligence timeline should be extended.
+
+Current open risks as of this update:
+- IP co-ownership dispute (EP3847291, EP3901445) with Dr. Klaus Haber: unresolved
+- Patent infringement suit by Axion Corp: 3 active claims, response brief due Nov 30
+- PharmaCo International renewal: uncertain, evaluation underway
+- External audit FY 2024: not completed
+- CTO and senior engineer departures: scheduled Q4 2025 / Q1 2026

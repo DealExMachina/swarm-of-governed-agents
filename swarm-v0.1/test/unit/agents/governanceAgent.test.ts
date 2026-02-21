@@ -107,14 +107,16 @@ describe("governanceAgent", () => {
     expect(rejectionCalls).toHaveLength(0);
   });
 
-  it("rejects proposal when canTransition blocks (high drift, DriftChecked -> ContextIngested)", async () => {
+  it("escalates to pending when canTransition blocks (critical drift, DriftChecked -> ContextIngested)", async () => {
+    const { getPending, _clearPendingForTest } = await import("../../../src/mitlServer");
+    _clearPendingForTest();
     mockLoadState.mockResolvedValue({
       runId: "r1",
       lastNode: "DriftChecked",
       updatedAt: "",
       epoch: 5,
     });
-    const s3 = createMockS3("high");
+    const s3 = createMockS3("critical");
     const env: GovernanceAgentEnv = {
       s3,
       bucket: "b",
@@ -132,9 +134,39 @@ describe("governanceAgent", () => {
 
     await processProposal(proposal, env);
 
-    expect(rejectionCalls).toHaveLength(1);
-    expect(rejectionCalls[0].data.reason).toContain("High drift");
-    expect(actionCalls).toHaveLength(0);
+    const pendingList = getPending();
+    expect(pendingList.some((p) => p.proposal_id === "p2")).toBe(true);
+    expect(rejectionCalls).toHaveLength(0);
+  });
+
+  it("approves proposal when drift is high (only critical blocks)", async () => {
+    mockLoadState.mockResolvedValue({
+      runId: "r1",
+      lastNode: "DriftChecked",
+      updatedAt: "",
+      epoch: 5,
+    });
+    const s3 = createMockS3("high");
+    const env: GovernanceAgentEnv = {
+      s3,
+      bucket: "b",
+      getPublishAction: () => publishAction,
+      getPublishRejection: () => publishRejection,
+    };
+    const proposal: Proposal = {
+      proposal_id: "p2b",
+      agent: "planner-1",
+      proposed_action: "advance_state",
+      target_node: "ContextIngested",
+      payload: { expectedEpoch: 5, from: "DriftChecked", to: "ContextIngested" },
+      mode: "YOLO",
+    };
+
+    await processProposal(proposal, env);
+
+    expect(actionCalls).toHaveLength(1);
+    expect(actionCalls[0].data.result).toBe("approved");
+    expect(rejectionCalls).toHaveLength(0);
   });
 
   it("when mode is MITL, adds to pending and publishes to pending_approval (no immediate action)", async () => {
@@ -254,14 +286,14 @@ describe("governanceAgent", () => {
       });
     });
 
-    it("returns reject with transition reason when canTransition blocks", async () => {
+    it("returns pending with governance_review when canTransition blocks (critical drift)", async () => {
       mockLoadState.mockResolvedValue({
         runId: "r1",
         lastNode: "DriftChecked",
         updatedAt: "",
         epoch: 5,
       });
-      const s3 = createMockS3("high");
+      const s3 = createMockS3("critical");
       const env: GovernanceAgentEnv = {
         s3,
         bucket: "b",
@@ -277,9 +309,37 @@ describe("governanceAgent", () => {
         mode: "YOLO",
       };
       const result = await evaluateProposalDeterministic(proposal, env);
-      expect(result.outcome).toBe("reject");
-      expect(result.reason).toContain("High drift");
+      expect(result.outcome).toBe("pending");
+      expect(result.reason).toContain("Critical drift");
       expect(result.actionPayload).toBeDefined();
+      expect((result.actionPayload as Record<string, unknown>).type).toBe("governance_review");
+    });
+
+    it("returns approve when drift is high (only critical blocks in YAML)", async () => {
+      mockLoadState.mockResolvedValue({
+        runId: "r1",
+        lastNode: "DriftChecked",
+        updatedAt: "",
+        epoch: 5,
+      });
+      const s3 = createMockS3("high");
+      const env: GovernanceAgentEnv = {
+        s3,
+        bucket: "b",
+        getPublishAction: () => publishAction,
+        getPublishRejection: () => publishRejection,
+      };
+      const proposal: Proposal = {
+        proposal_id: "p2b",
+        agent: "planner-1",
+        proposed_action: "advance_state",
+        target_node: "ContextIngested",
+        payload: { expectedEpoch: 5, from: "DriftChecked", to: "ContextIngested" },
+        mode: "YOLO",
+      };
+      const result = await evaluateProposalDeterministic(proposal, env);
+      expect(result.outcome).toBe("approve");
+      expect(result.reason).toBe("policy_passed");
     });
 
     it("returns reject with policy_denied when checkPermission denies", async () => {

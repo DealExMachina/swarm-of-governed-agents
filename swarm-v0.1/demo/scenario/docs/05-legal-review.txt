@@ -1,0 +1,47 @@
+PROJECT HORIZON — LEGAL & COMPLIANCE REVIEW
+
+Prepared by: Intellectual Property and M&A Legal Team
+Date: 2025-10-28
+Classification: CONFIDENTIAL — ATTORNEY-CLIENT PRIVILEGE
+
+PATENT RISK ASSESSMENT
+
+After reviewing the Axion Corp complaint, NovaTech AG's full patent portfolio, Dr. Haber's co-ownership correspondence, and the relevant prior art landscape, our assessment is as follows.
+
+AXION CORP CLAIMS
+
+Claim 1 (EP3847291 / EP3672891 overlap): Low-to-medium probability of success for Axion. NovaTech's patent was filed 7 months after Axion's EP3672891, and the method claims have a 40%–55% overlap in scope. This is the strongest of the three claims and should be taken seriously. Estimated litigation cost if contested to judgment: €2.5M–€4M over 18–24 months.
+
+Claim 2 (cold-chain monitoring): Weak. Prior art clearly predates both parties' patents and would likely invalidate Axion's EP3789124 on this point. We expect this claim to be dismissed at a preliminary hearing.
+
+Claim 3 (compliance reporting structure): Weak. The contested feature in NovaTech's implementation predates Axion's filing date. We recommend filing a prior art submission.
+
+Recommended resolution for Axion claims: negotiate a licensing agreement covering Claim 1 only. Estimated settlement: €1.5M–€2.0M upfront license fee, plus a 4% ARR royalty for 5 years. This is within the range of Axion's historical settlement terms and avoids a prolonged dispute.
+
+DR. HABER CO-OWNERSHIP DISPUTE
+
+EP3847291 and EP3901445 are both subject to legitimate co-ownership claims based on the employment and advisory agreement Dr. Haber signed in 2021. The agreement is ambiguous on IP assignment for inventions developed in an advisory rather than employee capacity. A German court would likely treat this as a shared ownership scenario.
+
+Co-ownership of EP3847291 creates a material problem: any acquirer would inherit the patent encumbrance. Without Dr. Haber's explicit consent, licensing EP3847291 to third parties post-acquisition may not be possible, and cross-licensing in the Axion settlement may be complicated.
+
+Recommended resolution: negotiate a full IP buyout with Dr. Haber. Estimated consideration: €800K–€1.2M, structured as a lump sum. This must be completed before deal close.
+
+Note: once EP3847291 is fully acquired and the Axion claim settled, the remaining IP position is clean. Claims 2 and 3 are expected to be dismissed.
+
+COMPLIANCE ASSESSMENT
+
+NovaTech AG has achieved SOC 2 Type I certification (audit completed June 2025). SOC 2 Type II is scheduled for March 2026. No material findings in the Type I report. GDPR data processing agreements are in place for all EU clients. Enterprise contracts reviewed: no material indemnification exposure identified.
+
+REVISED VALUATION GUIDANCE
+
+Accounting for IP resolution costs, retention packages, EU MDR compliance investment, and a patent risk discount reflecting residual litigation uncertainty, we recommend revising the acquisition price to €270M–€290M. This represents a reduction from the original indicative range of €400M–€430M.
+
+The revised multiple is 7.1x–7.6x adjusted ARR of €38M, which is consistent with comparable SaaS acquisitions carrying unresolved IP disputes and talent transition risk.
+
+OVERALL CONCLUSION
+
+The acquisition of NovaTech AG remains strategically compelling at the revised price point. The IP and talent risks are real but addressable. All three goals of Phase 2 — validate ARR, confirm IP ownership, assess talent risk — have now produced findings that materially revise the initial assessment.
+
+The path to a clean deal requires: (1) Axion Corp licensing settlement, (2) Dr. Haber IP buyout, (3) CTO and senior engineer retention packages. Subject to execution of these three actions and acceptance of the revised price by NovaTech AG's shareholders, we recommend proceeding to final negotiation and exclusivity.
+
+The diligence scope is substantially complete. Remaining open items: FY 2024 external audit sign-off and confirmation of PharmaCo International renewal intent.

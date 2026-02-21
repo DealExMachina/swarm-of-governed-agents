@@ -64,7 +64,7 @@ def _call_openai_fallback(prompt_context: str, prompt_previous: str) -> str:
     from openai import OpenAI
     ollama_base = os.getenv("OLLAMA_BASE_URL", "").strip()
     if ollama_base:
-        client = OpenAI(api_key="ollama", base_url=ollama_base)
+        client = OpenAI(api_key="ollama", base_url=f"{ollama_base.rstrip('/')}/v1")
         model = os.getenv("EXTRACTION_MODEL", "qwen3:8b")
     else:
         client = OpenAI(
@@ -363,6 +363,19 @@ def extract_facts_and_drift(
         raw = raw.split("\n", 1)[-1] if "\n" in raw else raw[3:]
         raw = raw.rsplit("```", 1)[0].strip()
     facts_dict = json.loads(raw)
+
+    # Normalize list-type fields: if the LLM returns a dict instead of a flat list
+    # (e.g. entities: {"organizations": [...], "regulations": [...]}), flatten it.
+    for key in ("entities", "claims", "risks", "assumptions", "contradictions", "goals"):
+        val = facts_dict.get(key)
+        if isinstance(val, dict):
+            flat = []
+            for v in val.values():
+                if isinstance(v, list):
+                    flat.extend(str(item) for item in v)
+                else:
+                    flat.append(str(v))
+            facts_dict[key] = flat
 
     facts = Facts(**facts_dict)
     # Merge GLiNER entities (dedupe)

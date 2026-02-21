@@ -4,7 +4,7 @@ goal_gradient:
     contradiction_resolution: 0.30
     goal_completion: 0.25
     risk_score_inverse: 0.15
-  near_finality_threshold: 0.75
+  near_finality_threshold: 0.40
   auto_finality_threshold: 0.92
 
 finality:

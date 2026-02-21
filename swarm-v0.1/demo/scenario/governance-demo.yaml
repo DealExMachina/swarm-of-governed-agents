@@ -1,0 +1,65 @@
+# Governance configuration for the Project Horizon M&A demo scenario
+#
+# Approval mode: YOLO | MITL | MASTER
+#
+# YOLO  — agents process automatically; governance validates and approves all
+#          transitions that pass policy checks. Use for normal throughput.
+#          Human review is only triggered at finality (when the system is near-done
+#          but not confident enough to self-resolve).
+#
+# MITL  — every governance proposal goes to a human queue. Use to demonstrate
+#          granular human oversight at every step.
+#
+# MASTER — deterministic rule-based path, no LLM rationale. Use for
+#          regulated environments where LLM-generated rationale is not acceptable.
+mode: YOLO
+
+# Remediation rules: when the drift agent detects specific conditions,
+# the governance layer recommends these actions to the planner.
+# These show up in GET /summary → drift.suggested_actions.
+rules:
+  # Contradiction detected → open a structured investigation
+  - when:
+      drift_level: [medium, high]
+      drift_type: contradiction
+    action: open_investigation
+
+  # Goal shift → refresh the goal register with current intent
+  - when:
+      drift_level: [medium, high]
+      drift_type: goal
+    action: request_goal_refresh
+
+  # Factual claim changed significantly → request source validation
+  - when:
+      drift_level: [high]
+      drift_type: factual
+    action: request_source_refresh
+
+  # High entropy (many simultaneous changes) → halt and review
+  - when:
+      drift_level: [high]
+      drift_type: entropy
+    action: halt_and_review
+
+  # Value/metric discrepancy (e.g., ARR overstatement) → request external audit
+  - when:
+      drift_level: [medium, high]
+      drift_type: value_discrepancy
+    action: request_external_audit
+
+  # New risk class introduced → escalate to risk committee
+  - when:
+      drift_level: [medium, high]
+      drift_type: risk
+    action: escalate_to_risk_committee
+
+# Transition blocking rules: the governance agent enforces these before
+# allowing the state machine to advance. If a block condition is met,
+# the proposal is rejected and the reason is logged to the audit trail.
+transition_rules:
+  - from: DriftChecked
+    to: ContextIngested
+    block_when:
+      drift_level: [high]
+    reason: "High drift detected — cycle is blocked until the planner proposes a remediation action. This prevents the swarm from treating unresolved contradictions as if they were normal context."

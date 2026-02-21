@@ -121,9 +121,16 @@ describe("governance", () => {
       expect(realConfig.transition_rules).toBeDefined();
       expect(realConfig.transition_rules!.length).toBeGreaterThanOrEqual(1);
 
-      const drift: DriftInput = { level: "high", types: [] };
+      const drift: DriftInput = { level: "critical", types: [] };
       const decision = canTransition("DriftChecked", "ContextIngested", drift, realConfig);
       expect(decision.allowed).toBe(false);
+    });
+
+    it("allows DriftChecked -> ContextIngested when drift is high (only critical blocks)", () => {
+      const realConfig = loadPolicies(GOVERNANCE_PATH);
+      const drift: DriftInput = { level: "high", types: ["contradiction"] };
+      const decision = canTransition("DriftChecked", "ContextIngested", drift, realConfig);
+      expect(decision.allowed).toBe(true);
     });
   });
 });

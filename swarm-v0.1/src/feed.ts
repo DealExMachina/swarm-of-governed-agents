@@ -15,7 +15,7 @@ import { makeS3 } from "./s3.js";
 import { s3GetText } from "./s3.js";
 import { toErrorString } from "./errors.js";
 import { loadPolicies, evaluateRules } from "./governance.js";
-import { evaluateFinality, computeGoalScoreForScope, loadFinalityConfig } from "./finalityEvaluator.js";
+import { evaluateFinality, computeGoalScoreForScope, loadFinalityConfig, loadFinalitySnapshot } from "./finalityEvaluator.js";
 import { getGraphSummary, appendResolutionGoal } from "./semanticGraph.js";
 import { getLatestFinalityDecision } from "./finalityDecisions.js";
 
@@ -251,6 +251,19 @@ async function handleSummary(res: ServerResponse): Promise<void> {
             dimension_breakdown: result?.kind === "review" ? result.request.dimension_breakdown : null,
             blockers: result?.kind === "review" ? result.request.blockers : null,
             last_decision: last_decision ?? undefined,
+            dimensions: await (async () => {
+              try {
+                const snap = await loadFinalitySnapshot(SCOPE_ID);
+                const contraTotal = snap.contradictions_total_count || 0;
+                const contraResolved = contraTotal === 0 ? 1 : 1 - (snap.contradictions_unresolved_count / contraTotal);
+                return {
+                  claim_avg_confidence: snap.claims_active_avg_confidence,
+                  contradiction_resolution_ratio: contraResolved,
+                  goal_completion_ratio: snap.goals_completion_ratio,
+                  risk_score_inverse: 1 - Math.min(snap.scope_risk_score, 1),
+                };
+              } catch { return null; }
+            })(),
           };
         } catch {
           return null;

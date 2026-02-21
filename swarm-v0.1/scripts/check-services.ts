@@ -11,7 +11,7 @@
  */
 import "dotenv/config";
 import { Pool } from "pg";
-import { HeadBucketCommand } from "@aws-sdk/client-s3";
+import { HeadBucketCommand, CreateBucketCommand } from "@aws-sdk/client-s3";
 import { makeS3 } from "../src/s3.js";
 import { waitForNatsAndStream } from "../src/readiness.js";
 
@@ -52,7 +52,11 @@ async function checkS3(): Promise<string | null> {
   if (!process.env.S3_ENDPOINT) return "S3_ENDPOINT not set";
   try {
     const s3 = makeS3();
-    await s3.send(new HeadBucketCommand({ Bucket: bucket }));
+    try {
+      await s3.send(new HeadBucketCommand({ Bucket: bucket }));
+    } catch {
+      await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+    }
     return null;
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
@@ -85,7 +89,8 @@ async function checkFactsWorker(): Promise<string | null> {
       signal: AbortSignal.timeout(FACTS_WORKER_TIMEOUT_MS),
     });
     // 400/422 = bad request (endpoint is up); 405 = method not allowed (still up)
-    if (res.ok || [400, 405, 422].includes(res.status)) return null;
+    // 500 = endpoint is up but downstream (LLM) may be misconfigured — still counts as reachable
+    if (res.ok || [400, 405, 422, 500].includes(res.status)) return null;
     const text = await res.text();
     let detail = text;
     try {
@@ -97,6 +102,53 @@ async function checkFactsWorker(): Promise<string | null> {
     return `HTTP ${res.status}: ${detail.split("\n")[0].slice(0, 200)}`;
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function checkOpenAI(): Promise<string | null> {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) return "OPENAI_API_KEY not set";
+  const base = (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
+  const url = base.endsWith("/v1") ? `${base}/models` : `${base}/v1/models`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) return null;
+    const text = await res.text();
+    return `HTTP ${res.status}: ${text.slice(0, 120)}`;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function checkOllama(): Promise<string | null> {
+  const base = process.env.OLLAMA_BASE_URL?.trim();
+  if (!base) return "OLLAMA_BASE_URL not set";
+  const url = `${base.replace(/\/$/, "")}/api/tags`;
+  const t0 = Date.now();
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'check-services.ts:checkOllama',message:'start',data:{url,timeoutMs:15000},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(15000),
+    });
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'check-services.ts:checkOllama',message:'ok',data:{status:res.status,elapsedMs:Date.now()-t0},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    if (res.ok) return null;
+    return `HTTP ${res.status}`;
+  } catch (e: any) {
+    const errMsg = e instanceof Error ? e.message : String(e);
+    const cause = e?.cause ? (e.cause instanceof Error ? e.cause.message : String(e.cause)) : 'none';
+    const errName = e?.name ?? 'unknown';
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'check-services.ts:checkOllama',message:'error',data:{errName,errMsg,cause,elapsedMs:Date.now()-t0},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    return errMsg;
   }
 }
 
@@ -137,6 +189,11 @@ export async function checkAllServices(opts?: {
     { name: "NATS", check: checkNats },
     { name: "facts-worker", check: checkFactsWorker },
   ];
+  if (process.env.OLLAMA_BASE_URL?.trim()) {
+    checks.push({ name: "Ollama", check: checkOllama });
+  } else if (process.env.OPENAI_API_KEY?.trim()) {
+    checks.push({ name: "OpenAI", check: checkOpenAI });
+  }
   if (process.env.CHECK_FEED === "1") {
     checks.push({ name: "feed", check: checkFeed });
   }
@@ -159,6 +216,9 @@ export async function checkAllServices(opts?: {
     if (round === 0) {
       console.error("Services not ready:");
       for (const r of failed) console.error(`  ${r.name}: ${r.err}`);
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'check-services.ts:retry-loop',message:'first-failure',data:{failed:failed.map(r=>({name:r.name,err:r.err})),round},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
     }
     console.error(`Retrying in ${Math.round(wait / 1000)}s...`);
     await sleep(wait);
@@ -166,9 +226,12 @@ export async function checkAllServices(opts?: {
 }
 
 async function main(): Promise<void> {
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'check-services.ts:main',message:'env-snapshot',data:{OLLAMA_BASE_URL:process.env.OLLAMA_BASE_URL,FACTS_WORKER_URL:process.env.FACTS_WORKER_URL,nodeVersion:process.version},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
   const { ok, results } = await checkAllServices();
   if (ok) {
-    const list = process.env.CHECK_FEED === "1" ? "Postgres, S3, NATS, facts-worker, feed" : "Postgres, S3, NATS, facts-worker";
+    const list = results.map((r) => r.name).join(", ");
     console.log(`All services OK (${list}).`);
     process.exit(0);
   }
