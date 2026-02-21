@@ -1,250 +1,245 @@
 # swarm-v0.1
 
-Governed agent swarm: multiple agents consume jobs from NATS JetStream, interact with a Postgres-backed state graph, and follow declarative governance rules. Context is an append-only event log in Postgres; facts and drift live in S3.
+Governed agent swarm: event-driven reasoning roles sharing a context, governed by policy, converging toward finality.
 
-## Why this exists
+---
 
-This repo is an **experiment** to move agents **out of fixed workflows** and into **reasoning roles** that react to events over a **shared context and facts state**. Instead of a single DAG or scripted pipeline, we want:
+## The case against straightjackets
 
-- **Event-driven activation:** New events (e.g. a document in the context WAL) hit a shared, durable context and facts layer. Agents run when their conditions are met (state node, filters, jobs), not because a workflow step called them.
-- **Shared state graph:** A small state machine (ContextIngested → FactsExtracted → DriftChecked → ContextIngested) plus S3-held facts and drift give every agent the same view of “what is known” and “what changed.” Reasoning (facts extraction, drift, planning, status) is done by **roles** that read and write that shared state.
-- **Governance, not ad-hoc wiring:** Who can do what, and when transitions are allowed, is governed by **OpenFGA** (policy checks: agent X can write to node Y) and **declarative rules** in `governance.yaml` (e.g. block cycle reset when drift is high, suggest `open_investigation` on contradiction). The system stays auditable and policy-driven instead of hard-coded.
+Most agent frameworks default to the same design: a directed graph, a fixed pipeline, a hardcoded sequence of steps. Tool 1 calls Tool 2, Tool 2 calls Tool 3. The orchestrator decides what happens next. If an unexpected condition arises — conflicting data, a missing predecessor, a policy constraint — the system either crashes, silently skips it, or falls to a cascade of if-else branches someone added at 11pm.
 
-So the goal is: agents as **reasoning roles** that respond to events, share one context/facts/state picture, and are constrained by OpenFGA and governance rules. This README describes how that is implemented and how to run the demo.
+This works for demos. It does not work for coordination.
 
-## Stack
+The core problem is that **workflow orchestration conflates sequencing with reasoning**. A DAG answers "what comes next" but not "should this happen at all, given what we know." It bakes the coordination logic into the structure itself, which means every new agent, every new rule, every new exception requires rewiring. The graph becomes load-bearing and fragile simultaneously.
 
-- **TypeScript** for orchestration, state graph, event bus client, agents, and tests.
+Agents are increasingly capable of making local judgments. The open question is: how do we let them do so while keeping the overall system coherent, auditable, and safe? Putting them in a pipeline is one answer. It is the wrong one. A pipeline delegates coherence to topology. We want coherence to come from **shared state, shared policy, and a coordination mechanism that enforces invariants without prescribing sequence**.
 
-**Dependencies:** All runtime and dev dependencies use stable majors (e.g. `@aws-sdk/client-s3` ^3.x, `@mastra/core` ^0.24.x, `zod` ^3.x, `vitest` ^2.x). Major upgrades (dotenv 17, vitest 4, zod 4) are left for deliberate migration; `npm outdated` may show newer majors.
-- **Python** for the facts-worker (DSPy/OpenAI) used by the facts agent.
-- **Docker** for MinIO, Postgres, NATS JetStream, and the facts-worker.
-- **NATS JetStream** as the event bus (job dispatch, durable consumers).
-- **Postgres** for the context WAL (`context_events`) and state graph (`swarm_state` with epoch CAS).
-- **S3-compatible (MinIO)** for facts, drift snapshots, and history.
+That is what this project explores.
+
+---
+
+## Governance, not orchestration
+
+The alternative is not "let agents do whatever they want." It is **governed coordination**: agents operate independently on shared state, and what they are *allowed* to do is determined by declarative policy, not hard-coded call chains.
+
+The architecture rests on three principles:
+
+**1. Shared, append-only context.** Every agent reads from the same event log (Postgres WAL) and the same facts/drift state (S3). There is no "agent A's context" vs "agent B's context." There is context. Agents read it, reason over it, propose changes, and wait for approval. The log is the system's memory.
+
+**2. Proposals and approvals.** No agent directly advances the state. A facts agent extracts and proposes `FactsExtracted`; the governance agent checks whether that transition is currently allowed (given drift level, policy, epoch); the executor performs it if approved. This single control-loop pattern decouples the reasoning work from the state mutation. It also produces an audit trail: every transition has a reason, a proposer, and an approver.
+
+**3. Declarative rules, not imperative code.** `governance.yaml` expresses transition rules ("block DriftChecked → ContextIngested when drift is high") and remediation actions ("open investigation when contradiction detected"). Rules are evaluated at runtime, not compiled into graph edges. Adding a new constraint is a YAML change, not a refactor.
+
+The result: agents are **reasoning roles**, not pipeline stages. A drift agent does not need to know whether a planner agent ran before it. It reads the shared state, checks its precondition, runs if appropriate, and proposes an advance. The coordination emerges from the shared context and the governance layer — not from wiring.
+
+---
+
+## Why OpenFGA belongs here
+
+The governance rules in `governance.yaml` handle *when* transitions are allowed. But enterprise deployments raise a prior question: **who is allowed to do what to which resource?**
+
+Consider a multi-tenant deployment: multiple scopes (clients, projects, divisions) sharing the same swarm infrastructure. Agent A should be able to write facts for scope X but not scope Y. A human reviewer should be able to approve finality for their own scope but not others'. An audit role should have read access everywhere but write access nowhere.
+
+Hard-coding these rules into each agent creates the same fragility as hard-coding workflow logic into a DAG. Every role change, every new scope, every new agent requires code changes, deployments, and re-testing. More fundamentally: policy becomes invisible, scattered across dozens of if-statements, impossible to audit as a whole.
+
+**OpenFGA** — an open implementation of Google Zanzibar — provides a dedicated authorization layer that separates policy from code entirely. Instead of `if agent_role == "facts" and scope == "allowed_scope"`, you write a relationship model: `agent facts-1 is writer on node FactsExtracted for scope X`. Permission checks become API calls: `check(agent-id, write, node:FactsExtracted)`. The answer is derived from the relationship graph, not scattered conditionals.
+
+For enterprise use, this matters for three reasons:
+
+- **Auditability:** The full permission model is a first-class object. You can inspect, diff, and version it. Compliance teams can audit authorization logic without reading agent code.
+- **Least privilege at scale:** As the number of agents, scopes, and roles grows, the permission surface grows combinatorially. A relationship model manages that growth; conditional logic does not.
+- **Dynamic policy:** Zanzibar-style models support computed relationships (e.g. "member of group X implies permission on all scopes owned by group X"). Governance evolves without redeployment.
+
+In this project, OpenFGA is wired into the governance agent's `checkPolicy` tool. When a proposal arrives, the agent checks both the transition rules and the policy: did the proposing agent have write permission on the target node? Both can reject. Neither is in application code. The invariant holds whether the governance agent uses an LLM for rationale or a rule-based path as fallback.
+
+---
+
+## The semantic graph as coordination substrate
+
+A shared event log is necessary. A facts object in S3 is useful. But a flat log and a blob of JSON do not support the coordination questions that actually matter as complexity grows: *Have we resolved the contradiction between claim A and claim B? Which goals are still open? Does this new information invalidate a previous risk assessment?*
+
+The **semantic graph** — Postgres with pgvector — makes the knowledge structure explicit. Claims, goals, risks, and assumptions become addressable nodes. Contradictions and supports become typed edges. The graph is updated after each extraction cycle; it persists across cycles. You can query it: give me all unresolved contradictions for scope X; give me the goals with completion ratio below threshold; give me the claims with confidence below 0.85 — the finality layer does exactly this.
+
+**Finality** (`finality.yaml`) closes the loop. Instead of running forever or stopping arbitrarily, a scope can reach a determined state: RESOLVED (sufficient confidence, no contradictions, goals met), ESCALATED (risk threshold exceeded), BLOCKED (idle with open issues), EXPIRED (inactive for a month). When the system is near finality but not quite — confidence is high, one contradiction remains unresolved — it does not force a decision. It routes to **human-in-the-loop review**: the governance agent builds an explanation ("here is what is blocking finality, here is what would resolve it, here are the options") and puts it in a MITL queue for a human to evaluate.
+
+The pattern is: agents converge on knowledge, the semantic graph makes convergence measurable, finality decides when the process is done (or stuck), and humans step in precisely when the system cannot decide on its own. No hard-coded stopping condition. No silent termination.
+
+---
+
+## Scalability: from swarm to fabric
+
+This prototype runs one swarm with four agents against one scope. The architecture is designed to scale out along several axes.
+
+**Multiple scopes.** Each scope is an isolated coordination context: its own semantic graph nodes, its own finality state, its own MITL queue. A single swarm can serve many scopes simultaneously, with OpenFGA enforcing isolation. Finality gives each scope a lifecycle that does not depend on the others.
+
+**Multiple agents per role.** The pull-consumer model on NATS means you can run ten facts agents against the same stream. Each picks up one job, runs extraction, proposes an advance. Epoch-based CAS on the state graph prevents double-advances. Horizontal scaling is additive, not architectural.
+
+**Heterogeneous models.** The facts-worker is a separate Python service. The extraction model is a configuration parameter. Nothing prevents running a lighter model for low-stakes scopes and a heavier one for high-stakes ones — or routing to different backends per scope. The governance and finality layers stay constant; only the extraction backend changes.
+
+**Multi-organization.** OpenFGA's relationship model supports org-level tenancy natively. Agent pools, scope ownership, and cross-org collaboration can be expressed as relationship tuples without touching agent code. A shared infrastructure can serve multiple organizations with strict policy isolation.
+
+**The key constraint that scales well:** because governance is declarative and finality is computed from the semantic graph, adding complexity does not require rewriting the agents. You add rules to `governance.yaml`, update the finality weights in `finality.yaml`, adjust the authorization model in OpenFGA. The agents remain unchanged. The coordination substrate absorbs the new constraints.
+
+The key constraint that does not scale well is the single-scope state machine — a bottleneck if thousands of scopes share a singleton. That is a solvable partition problem, not an architectural dead end.
+
+---
 
 ## Architecture
 
-**Event bus (NATS JetStream)**
+**Event bus:** NATS JetStream stream `SWARM_JOBS` with subjects `swarm.jobs.>`, `swarm.proposals.>`, `swarm.actions.>`, `swarm.events.>`. Durable pull consumers, one per agent instance. No leases, no S3 queues.
 
-- Stream `SWARM_JOBS` with subjects `swarm.jobs.>`.
-- Job types: `extract_facts`, `check_drift`, `plan_actions`, `summarize_status`.
-- Each agent consumes its subject with a durable consumer; no S3 queue, no leases.
+**Context and state:** Postgres `context_events` (append-only WAL, seq/ts/data JSONB) and `swarm_state` (singleton, epoch CAS). S3 for `facts/latest.json`, `drift/latest.json`, and history. The WAL is readable by all agents; no agent owns the log.
 
-**Context and state**
+**Semantic graph:** Postgres `nodes` (type, scope, payload, optional `embedding vector(1024)`) and `edges` (source, target, edge_type). Migration `005_semantic_graph.sql`. Synced from facts after each extraction cycle. Queried by the finality evaluator.
 
-- **Context WAL:** Postgres table `context_events` (seq, ts, data JSONB). Agents append events and read via `tailEvents` / `eventsSince`.
-- **State graph:** Postgres table `swarm_state` (singleton). Nodes: `ContextIngested` -> `FactsExtracted` -> `DriftChecked` -> `ContextIngested`. Transitions use epoch-based CAS; governance rules can block transitions (e.g. high drift blocks cycle reset).
-- **S3:** `facts/latest.json`, `facts/history/`, `drift/latest.json`, `drift/history/`.
+**Governance loop:** Planner proposes → governance agent checks transition rules + OpenFGA policy + optionally LLM rationale → executor performs approved advance. `advance_state` is always deterministic; the LLM adds explanation, not authority.
 
-**Governance**
+**Finality:** After each governance round, `evaluateFinality(scopeId)` runs against the semantic graph. Above `auto_finality_threshold` (0.92): auto-RESOLVED. Between `near_finality_threshold` (0.75) and threshold: HITL review queued to MITL server. Conditions for ESCALATED, BLOCKED, EXPIRED are evaluated in parallel.
 
-- `governance.yaml` defines rule-based actions (e.g. open_investigation when drift is medium/high and type is contradiction) and transition rules (e.g. block DriftChecked -> ContextIngested when drift level is high).
-- The planner agent evaluates rules; the swarm passes drift and governance into `advanceState` for transition gating.
+**Facts-worker:** Python (FastAPI + DSPy/OpenAI-compatible). Runs in Docker. When Ollama is configured on the host, the container uses `host.docker.internal` to reach it — Compose enforces this so the worker always gets a reachable LLM URL regardless of what is in `.env`.
 
-**Agents**
+---
 
-- **Facts:** Reads context from WAL, calls Python facts-worker `/extract`, writes facts and drift to S3. Requires node `ContextIngested`, advances to `FactsExtracted`.
-- **Drift:** Snapshots drift to S3 history. Requires `FactsExtracted`, advances to `DriftChecked`.
-- **Planner:** Evaluates governance rules, dispatches status jobs for recommended actions. Requires `DriftChecked`, advances to `ContextIngested` (unless blocked by transition rules).
-- **Status:** Appends a status card to the context WAL. No state precondition; does not advance the graph.
+## Finality and semantic graph
 
-## Layout
+The semantic graph (Postgres + pgvector, migration `005_semantic_graph.sql`) holds addressable nodes (claims, goals, risks, assessments) and edges (e.g. `contradicts`, `resolves`). The finality layer uses it to decide when a scope is done or needs human review.
 
-```
-swarm-v0.1/
-  README.md
-  .env.example
-  package.json
-  tsconfig.json
-  vitest.config.ts
-  governance.yaml
-  migrations/
-    002_context_wal.sql
-    003_swarm_state.sql
-  src/
-    s3.ts
-    contextWal.ts
-    stateGraph.ts
-    eventBus.ts
-    agentRegistry.ts
-    governance.ts
-    logger.ts
-    swarm.ts
-    loadgen.ts
-    agents/
-      factsAgent.ts
-      driftAgent.ts
-      plannerAgent.ts
-      statusAgent.ts
-  test/
-    unit/
-    integration/
-  workers/
-    facts-worker/
-      app.py
-      rlm_facts.py
-      requirements.txt
-      tests/
-  docker-compose.yml
-```
+**Config:** `finality.yaml` defines a goal gradient (weights for claim confidence, contradiction resolution, goal completion, risk) and thresholds: `near_finality_threshold` (default 0.75) and `auto_finality_threshold` (default 0.92). It also defines conditions for RESOLVED (e.g. no unresolved contradictions, goals completion ratio ≥ 0.90), ESCALATED, BLOCKED, and EXPIRED. The evaluator loads a scope snapshot via `loadFinalitySnapshot(scopeId)` and computes a goal score from the gradient.
+
+**Path A — Auto RESOLVED:** When the goal score is above `auto_finality_threshold` and RESOLVED conditions hold, the scope is marked RESOLVED without human review.
+
+**Path B — Near-finality and HITL:** When the score is between `near_finality_threshold` and `auto_finality_threshold`, the system builds a finality review: an LLM (Ollama HITL model) explains why finality is not reached and what would resolve it, then the review is sent to the MITL server. A human can approve finality, provide a resolution, escalate, or defer.
+
+**Facts sync:** After each facts extraction, the facts agent writes to S3 and calls `syncFactsToSemanticGraph(scopeId, facts)`, which replaces fact-sourced nodes/edges for that scope and inserts claim, goal, and risk nodes (and contradiction edges). Set `FACTS_SYNC_EMBED=1` to embed claim nodes with Ollama `bge-m3` (1024-d); requires Ollama and the embedding model.
+
+**Scripts:** `npm run test:postgres-ollama` verifies Postgres (migrations 002/003/005) and Ollama embedding. `npm run seed:hitl` seeds the semantic graph with a deterministic near-finality state (e.g. one unresolved contradiction) so that when the swarm runs, a finality review appears in the MITL queue. See STATUS.md for the full flow.
+
+---
+
+## Stack
+
+- **TypeScript** — orchestration, agents, state graph, feed, tests.
+- **Python** — facts-worker (DSPy; Ollama or OpenAI-compatible extraction).
+- **Docker Compose** — Postgres (pgvector), MinIO, NATS JetStream, facts-worker, feed, OpenFGA, otel-collector.
+- **NATS JetStream** — event bus.
+- **Postgres + pgvector** — context WAL, state graph, semantic graph with optional 1024-d embeddings.
+- **MinIO** — S3-compatible blob store for facts, drift, and history.
+- **OpenFGA** — policy checks (Zanzibar-style; optional but wired in).
+- **Ollama or OpenAI** — extraction, rationale, HITL explanation, embeddings (`bge-m3`).
+
+---
 
 ## Run locally
 
-**Initial conditions:** NATS must be running with JetStream enabled (e.g. `docker run -d -p 4222:4222 nats:latest -js` or your `docker compose`). The swarm ensures the JetStream stream exists before agents subscribe; you can run `npm run ensure-stream` once to create it, or let `npm run swarm:all` do it automatically.
+**Prerequisites:** Docker. OpenAI key or Ollama running locally with the extraction model pulled (e.g. `ollama pull qwen3:8b`).
 
 ```bash
 cp .env.example .env
-# Set OPENAI_API_KEY (and optionally OPENAI_BASE_URL, OPENAI_MODEL) for the facts-worker.
-docker compose up -d
+# Edit .env: set OPENAI_API_KEY or OLLAMA_BASE_URL=http://host.docker.internal:11434
+docker compose up -d postgres s3 nats facts-worker feed
 npm i
 ```
 
-**Docker: ports and restart**
-
-Exposed ports (host:container):
-
-| Port  | Service       | Purpose                    |
-|-------|---------------|----------------------------|
-| 3002  | feed          | SSE event feed (HTML UI at `/`, stream at `/events`) |
-| 4222  | nats          | NATS client                |
-| 8222  | nats          | NATS monitoring            |
-| 5433  | postgres      | Postgres (internal 5432)   |
-| 9000  | s3 (MinIO)    | S3 API                     |
-| 9001  | s3 (MinIO)    | MinIO console              |
-| 8010  | facts-worker  | Facts extraction API       |
-| 3000  | openfga       | OpenFGA Playground (use http://localhost:3000/playground; `/` returns 404) |
-| 8080  | openfga       | OpenFGA HTTP API (swarm uses this for policy checks)                        |
-| 8081  | openfga       | OpenFGA gRPC (internal)                                                     |
-| 4317  | otel-collector| OTLP gRPC                  |
-| 4318  | otel-collector| OTLP HTTP                  |
-
-To use the latest images and recreate containers:
+**Preflight** — ensures Postgres, S3, NATS, and facts-worker are reachable before starting. Use `CHECK_SERVICES_MAX_WAIT_SEC=300` on first run (facts-worker installs Python deps on startup):
 
 ```bash
-docker compose pull
-docker compose up -d --force-recreate
+CHECK_SERVICES_MAX_WAIT_SEC=300 npm run check:services
 ```
 
-Create the bucket `swarm` in MinIO if needed (e.g. http://localhost:9001). Run migrations (Postgres):
+**Migrations:**
 
 ```bash
-psql "$DATABASE_URL" -f migrations/002_context_wal.sql
-psql "$DATABASE_URL" -f migrations/003_swarm_state.sql
+export PGPASSWORD="${POSTGRES_PASSWORD:-swarm}"
+psql -h localhost -p 5433 -U "${POSTGRES_USER:-swarm}" -d "${POSTGRES_DB:-swarm}" -f migrations/002_context_wal.sql
+psql -h localhost -p 5433 -U "${POSTGRES_USER:-swarm}" -d "${POSTGRES_DB:-swarm}" -f migrations/003_swarm_state.sql
+psql -h localhost -p 5433 -U "${POSTGRES_USER:-swarm}" -d "${POSTGRES_DB:-swarm}" -f migrations/005_semantic_graph.sql
 ```
 
-Run the swarm. Stream is created automatically; use `BOOTSTRAP=1` to seed initial jobs:
+**Seed, bootstrap, and launch:**
 
 ```bash
-BOOTSTRAP=1 npm run swarm:all
-# Or without bootstrap (stream only): npm run swarm:all
-# Or ensure stream once then start agents manually:
-npm run ensure-stream
-npm run swarm:all
-```
-
-Run all four agents manually (separate terminals):
-
-```bash
-AGENT_ROLE=facts   AGENT_ID=facts-1   npm run swarm
-AGENT_ROLE=drift   AGENT_ID=drift-1   npm run swarm
-AGENT_ROLE=planner AGENT_ID=planner-1 npm run swarm
-AGENT_ROLE=status  AGENT_ID=status-1  npm run swarm
-```
-
-**Monitoring and logs**
-
-- **Per-agent logs:** When using `npm run swarm:all`, each agent writes to `$LOG_DIR/swarm-<role>.log` (default `LOG_DIR=/tmp`). To watch one agent: `tail -f /tmp/swarm-facts.log`. To see all: `tail -f /tmp/swarm-*.log`.
-- **Live event stream (CLI):** `npm run observe` tails `swarm.events.>` from NATS and pretty-prints events (bootstrap, proposals, state transitions, briefings, etc.) in the terminal. Ctrl+C to stop.
-- **Live event feed (HTTP):** `npm run feed` starts an SSE server (default port 3002), or run it in Docker via `docker compose up -d` (feed service). Open `http://localhost:3002/` for the HTML event list, or `http://localhost:3002/events` for raw SSE. **Demo API:** `GET http://localhost:3002/summary` returns state, facts, drift, and what changed; `POST http://localhost:3002/context/docs` with JSON `{ "title", "body" }` adds a document and triggers the pipeline.
-
-**Where it starts working**
-
-The pipeline runs when (1) the state graph is at the right node for each agent, and (2) there is **context** for the facts agent to read. Context is the append-only log in Postgres (`context_events`). The facts agent calls `tailEvents(200)` and sends that to the Python facts-worker; if the WAL is empty, extraction has nothing to work on.
-
-**What kind of docs to load**
-
-Context events are JSON objects; the facts-worker expects events that contain readable **text** (e.g. a `text` field). The worker’s LLM extracts:
-
-- **entities** (people, orgs, products)
-- **claims**, **risks**, **assumptions**, **contradictions**, **goals**
-- **confidence** (0–1)
-
-So use **prose or semi-structured text** that supports that: announcements, reports, memos, meeting notes, articles, product briefs. Plain text or Markdown is fine. Each event can be one doc or one chunk; the last 200 events in the WAL are sent together as context for a single extraction. Drift is then computed by comparing this extraction to the previous one (so loading new or updated docs over time will produce drift and trigger governance rules).
-
-**You need to load context (e.g. a doc) once** so the facts agent has input:
-
-```bash
-# Seed the context WAL with a sample snippet (or pass a file path)
-npm run seed
-# Or seed from a file:
-npm run seed -- /path/to/your-doc.txt
-
-# Or seed the full set of sample business docs (recommended):
+npm run ensure-bucket && npm run ensure-stream
 npm run seed:all
+npm run bootstrap-once
+npm run swarm:all       # starts 4 agents + governance + executor; check:services runs first
 ```
-`seed:all` loads all `.txt`/`.md` files from `seed-docs/` in order (see `seed-docs/README.md`).
 
-Then run bootstrap so the pipeline sees the new context and starts the cycle:
+**Feed and summary:**
 
 ```bash
-npm run ensure-stream
-node --loader ts-node/esm scripts/bootstrap-once.ts
+# Feed runs in Docker on port 3002
+curl -s http://localhost:3002/summary | jq .state
+
+# Add a document to trigger the pipeline
+curl -s -X POST http://localhost:3002/context/docs \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Q4 update","body":"Revenue revised to $2.5M. New risk: compliance delay."}'
 ```
 
-Start governance and executor (separate terminals), then the four worker agents. The facts agent runs when it sees a **new context** event in the WAL (type `bootstrap` or `context_doc`). After a full cycle (ContextIngested -> FactsExtracted -> DriftChecked -> ContextIngested), the loop **suspends** until you add more docs or run bootstrap again.
-
-**Real demo flow**
-
-1. **Initial context:** Seed docs, then bootstrap (WAL gets `context_doc` and `bootstrap`). Start feed, swarm agents, governance, executor.
-2. **Add more docs:** POST a document to trigger the pipeline again:
-   ```bash
-   curl -s -X POST http://localhost:3002/context/docs -H "Content-Type: application/json" -d '{"title":"Q4 update","body":"Acme revised guidance: revenue target now $2.5M."}'
-   ```
-   The facts agent will run when it sees the new `context_doc` in the WAL.
-3. **User-facing output:** GET a summary of state, facts, drift, and what changed:
-   ```bash
-   curl -s http://localhost:3002/summary
-   ```
-   Returns: `state` (lastNode, epoch), `facts` (goals, confidence), `drift` (level, types, notes), `what_changed` (recent pipeline events).
-4. **Consensus and suspend:** When the full context has been processed and the state advances to `ContextIngested` again, no new `context_doc` or `bootstrap` is appended, so the facts agent does not re-run and the loop stays idle until you add another doc or re-bootstrap.
-
-Load generation (publish jobs to NATS):
+**Full automated E2E** (start Docker, reset, migrate, seed, bootstrap, run, verify):
 
 ```bash
-npm run build
-npm run loadgen -- 5
+./scripts/run-e2e.sh
 ```
+
+**Ports:** 3002 feed · 4222/8222 NATS · 5433 Postgres · 9000/9001 MinIO · 8010 facts-worker · 3001 MITL · 3000/8080 OpenFGA.
+
+---
+
+## Approval modes
+
+Set in `governance.yaml`:
+
+| Mode | Behaviour |
+|------|-----------|
+| `YOLO` | Governance agent approves all valid transitions automatically. |
+| `MITL` | Every proposal goes to the MITL queue; a human approves or rejects. |
+| `MASTER` | Deterministic rule-based path; no LLM rationale. |
+
+---
+
+## Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `npm run swarm:all` | Start four agents + governance + executor. Runs preflight first. |
+| `npm run check:services` | Preflight (Postgres, S3, NATS, facts-worker). Supports `CHECK_SERVICES_MAX_WAIT_SEC`, `CHECK_FEED=1`. |
+| `npm run bootstrap-once` | Publish bootstrap job and append bootstrap WAL event. |
+| `npm run seed:all` | Seed context WAL from `seed-docs/`. |
+| `npm run seed:hitl` | Seed semantic graph for a deterministic HITL finality scenario. |
+| `npm run reset-e2e` | Truncate DB, empty S3, delete NATS stream. |
+| `npm run ensure-stream` | Create or update NATS stream. |
+| `npm run ensure-bucket` | Create S3 bucket if missing. |
+| `npm run ensure-pull-consumers` | Recreate consumers as pull (fix "push consumer not supported"). |
+| `npm run feed` | Run feed server (port 3002). |
+| `npm run observe` | Tail NATS events in the terminal. |
+| `npm run check:model` | Test OpenAI-compatible endpoint from `.env`. |
+| `npm run test:postgres-ollama` | Verify Postgres (migrations 002/003/005) and Ollama embedding (bge-m3). |
+
+**E2E:** Run `./scripts/run-e2e.sh` to start Docker, run migrations (002/003/005), seed, bootstrap, swarm, POST a doc, and verify nodes/edges. Requires Postgres, MinIO, NATS, facts-worker, and feed. Set `FACTS_SYNC_EMBED=1` to verify claim embeddings are written. For facts-worker in Docker with Ollama on the host, set `OLLAMA_BASE_URL=http://host.docker.internal:11434` in `.env` (see `.env.example`).
+
+---
 
 ## Tests
 
-**TypeScript (Vitest)**
-
 ```bash
-npm run test
+npm run test          # TypeScript unit + integration (Vitest)
 npm run test:watch
 ```
-
-- Unit tests in `test/unit/` (state graph, S3, context WAL, event bus, governance, logger, agent registry). No external services required; NATS/Postgres are mocked where needed.
-- Integration tests in `test/integration/` require `DATABASE_URL`, `NATS_URL`, and/or S3 env vars; they are skipped when unset (`describe.skipIf(...)`).
-
-**Python (pytest)**
 
 ```bash
 cd workers/facts-worker
 pip install -r requirements.txt -r requirements-dev.txt
-pytest tests/ -v
+pytest tests/ -v      # Python facts-worker unit + integration
 ```
 
-## Scripts
+---
 
-- `npm run swarm` – run one swarm agent (set `AGENT_ROLE`, `AGENT_ID`).
-- `npm run swarm:all` – start facts, drift, planner, and status agents in the background.
-- `npm run build` – compile TypeScript to `dist/`.
-- `npm run start` – run compiled swarm entry (`node dist/swarm.js`).
-- `npm run loadgen -- <count>` – publish `<count>` extract_facts jobs to NATS.
-- `npm run seed [file]` – seed the context WAL with a sample or with the content of `file` (emits `context_doc`; facts run when they see it).
-- `npm run seed:all` – seed from all `.txt`/`.md` in `seed-docs/`.
-- `npm run check:model` – test that the OpenAI-compatible model is reachable with current `.env` (same config as facts agent and facts-worker).
+## Optional
 
-**Feed server (port 3002):** `GET /` or `GET /summary` (dashboard: state, facts, drift with why/suggested/sources, live events), `GET /summary?raw=1` (JSON), `POST /context/docs` (add doc to trigger pipeline).
+- **HITL finality scenario:** `npm run seed:hitl` seeds a near-finality state with an unresolved contradiction. Run the swarm; when governance evaluates finality, a `finality_review` appears in the MITL queue with explanation and options. See STATUS.md.
+- **Embeddings:** Set `FACTS_SYNC_EMBED=1` + Ollama serving `bge-m3`. Claim nodes get 1024-d embeddings for semantic search.
+- **Tuner agent:** `AGENT_ROLE=tuner npm run swarm` runs a periodic loop (every ~30min) that uses an LLM to optimize activation filter configs based on productive/wasted ratio stats.
+- **Observability:** Configure `OTEL_*` in `.env` to send traces and metrics to the otel-collector.
+
+For current status, verified functionality, and next steps, see **STATUS.md**.
