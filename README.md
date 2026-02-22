@@ -367,6 +367,22 @@ For current status, verified functionality, and next steps, see **STATUS.md**.
 
 ---
 
+## Citing this work
+
+If you use this project in academic research or technical writing, please cite:
+
+```bibtex
+@software{governed_agent_swarm_2026,
+  author       = {Jean-Baptiste Music},
+  title        = {Swarm of Governed Agents: Declarative Governance and Formal Convergence for Multi-Agent Coordination},
+  year         = {2026},
+  url          = {https://github.com/DealExMachina/swarm-of-governed-agents},
+  note         = {Event-driven agent swarm with Lyapunov convergence tracking, CRDT semantic graph, and declarative governance}
+}
+```
+
+---
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).
