@@ -1,6 +1,6 @@
 import pg from "pg";
-import { getPool } from "./db.js";
-import { appendEvent } from "./contextWal.js";
+import { getPool, runInTransaction } from "./db.js";
+import { ensureContextTable } from "./contextWal.js";
 import { createSwarmEvent } from "./events.js";
 import { canTransition, type DriftInput, type GovernanceConfig } from "./governance.js";
 
@@ -132,36 +132,40 @@ export async function advanceState(
   }
   const newEpoch = expectedEpoch + 1;
 
-  const res = await p.query(
-    `UPDATE swarm_state
-     SET last_node = $1, epoch = $2, updated_at = now()
-     WHERE scope_id = $3 AND epoch = $4
-     RETURNING run_id, last_node, epoch, updated_at`,
-    [next, newEpoch, scopeId, expectedEpoch],
-  );
+  // Atomic: state advance + audit event in a single transaction.
+  // If the audit event INSERT fails, the state UPDATE rolls back.
+  await ensureContextTable(p);
 
-  if (res.rowCount === 0) return null;
-  const row = res.rows[0];
-  const newState: GraphState = {
-    runId: row.run_id,
-    lastNode: row.last_node as Node,
-    epoch: parseInt(row.epoch, 10),
-    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
-  };
-
-  try {
-    await appendEvent(
-      createSwarmEvent("state_transition", {
-        from: current.lastNode,
-        to: newState.lastNode,
-        epoch: newState.epoch,
-        run_id: newState.runId,
-      }, { source: "state_graph" }),
-      p,
+  return runInTransaction(async (client) => {
+    const res = await client.query(
+      `UPDATE swarm_state
+       SET last_node = $1, epoch = $2, updated_at = now()
+       WHERE scope_id = $3 AND epoch = $4
+       RETURNING run_id, last_node, epoch, updated_at`,
+      [next, newEpoch, scopeId, expectedEpoch],
     );
-  } catch {
-    // Non-fatal: transition succeeded even if event emission fails
-  }
 
-  return newState;
+    if (res.rowCount === 0) return null;
+    const row = res.rows[0];
+    const newState: GraphState = {
+      runId: row.run_id,
+      lastNode: row.last_node as Node,
+      epoch: parseInt(row.epoch, 10),
+      updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
+    };
+
+    // Audit event in the same transaction — if this fails, state rolls back
+    const event = createSwarmEvent("state_transition", {
+      from: current.lastNode,
+      to: newState.lastNode,
+      epoch: newState.epoch,
+      run_id: newState.runId,
+    }, { source: "state_graph" });
+    await client.query(
+      "INSERT INTO context_events (data) VALUES ($1::jsonb)",
+      [JSON.stringify(event)],
+    );
+
+    return newState;
+  }, p);
 }

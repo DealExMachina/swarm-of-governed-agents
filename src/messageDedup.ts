@@ -38,3 +38,22 @@ export async function markProcessed(consumerName: string, messageId: string, poo
     [consumerName, messageId],
   );
 }
+
+/**
+ * Atomic check-and-mark: single INSERT ... ON CONFLICT DO NOTHING RETURNING.
+ * Returns true if the message was NOT yet processed (and is now marked).
+ * Returns false if already processed (idempotent, no-op).
+ * Eliminates the TOCTOU race between isProcessed() and markProcessed().
+ */
+export async function tryMarkProcessed(consumerName: string, messageId: string, pool?: pg.Pool): Promise<boolean> {
+  const p = pool ?? getPool();
+  await ensureProcessedMessagesTable(p);
+  const res = await p.query(
+    `INSERT INTO processed_messages (consumer_name, message_id, processed_at)
+     VALUES ($1, $2, now())
+     ON CONFLICT (consumer_name, message_id) DO NOTHING
+     RETURNING consumer_name`,
+    [consumerName, messageId],
+  );
+  return (res.rowCount ?? 0) > 0;
+}

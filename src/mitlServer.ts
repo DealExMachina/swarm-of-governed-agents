@@ -82,6 +82,18 @@ export async function getPending(pool?: pg.Pool): Promise<Array<{ proposal_id: s
   }));
 }
 
+/** True if there is already a pending finality_review for this scope (avoids duplicate HITL entries). */
+export async function hasPendingFinalityReviewForScope(scopeId: string, pool?: pg.Pool): Promise<boolean> {
+  const p = getPool(pool);
+  await ensureMitlPendingTable(p);
+  const prefix = `finality-${scopeId}-`;
+  const res = await p.query(
+    "SELECT 1 FROM mitl_pending WHERE status = 'pending' AND proposal_id LIKE $1 LIMIT 1",
+    [prefix + "%"],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
 export async function _clearPendingForTest(pool?: pg.Pool): Promise<void> {
   const p = getPool(pool);
   await p.query("DELETE FROM mitl_pending");
@@ -195,6 +207,15 @@ export function startMitlServer(port: number): void {
       res.end(JSON.stringify(data));
     };
 
+    if (method === "GET" && url === "/health") {
+      try {
+        await getSharedPool().query("SELECT 1");
+        send(200, { status: "ok", pg: "connected" });
+      } catch (e) {
+        send(503, { status: "unhealthy", pg: String(e) });
+      }
+      return;
+    }
     if (method === "GET" && url === "/pending") {
       if (!requireBearer(req, res)) return;
       try {

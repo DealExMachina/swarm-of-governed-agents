@@ -5,7 +5,7 @@
 import "dotenv/config";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { join } from "path";
-import { makeEventBus } from "./eventBus.js";
+import { makeEventBus, type EventBus } from "./eventBus.js";
 import type { PushSubscription } from "./eventBus.js";
 import { appendEvent } from "./contextWal.js";
 import { createSwarmEvent } from "./events.js";
@@ -14,12 +14,29 @@ import { tailEvents } from "./contextWal.js";
 import { makeS3 } from "./s3.js";
 import { s3GetText } from "./s3.js";
 import { toErrorString } from "./errors.js";
+import { getPool } from "./db.js";
 import { loadPolicies, getGovernanceForScope, evaluateRules } from "./governance.js";
 import { evaluateFinality, computeGoalScoreForScope, loadFinalityConfig, loadFinalitySnapshot } from "./finalityEvaluator.js";
 import { getConvergenceState, type ConvergenceState } from "./convergenceTracker.js";
 import { getGraphSummary, appendResolutionGoal } from "./semanticGraph.js";
 import { getLatestFinalityDecision } from "./finalityDecisions.js";
 import { requireBearer } from "./auth.js";
+
+// ── Persistent EventBus singleton ────────────────────────────────────────────
+// Reused across all requests (avoids creating/destroying NATS connections per POST).
+
+let _feedBus: EventBus | null = null;
+
+async function getFeedBus(): Promise<EventBus> {
+  if (!_feedBus) {
+    _feedBus = await makeEventBus();
+    await _feedBus.ensureStream(
+      process.env.NATS_STREAM ?? "SWARM_JOBS",
+      ["swarm.events.>"],
+    );
+  }
+  return _feedBus;
+}
 
 const FEED_PORT = parseInt(process.env.FEED_PORT ?? "3002", 10);
 const NATS_STREAM = process.env.NATS_STREAM ?? "SWARM_JOBS";
@@ -86,9 +103,8 @@ async function handleAddDoc(req: IncomingMessage, res: ServerResponse): Promise<
       { source: "feed" },
     );
     const seq = await appendEvent(event as unknown as Record<string, unknown>);
-    const bus = await makeEventBus();
+    const bus = await getFeedBus();
     await bus.publishEvent(event);
-    await bus.close();
     sendJson(res, 200, { seq, ok: true, message: "Document added; facts pipeline will run when agents process it." });
   } catch (e) {
     sendJson(res, 500, { error: toErrorString(e) });
@@ -116,9 +132,8 @@ async function handleAddResolution(req: IncomingMessage, res: ServerResponse): P
       { source: "feed" },
     );
     const seq = await appendEvent(event as unknown as Record<string, unknown>);
-    const bus = await makeEventBus();
+    const bus = await getFeedBus();
     await bus.publishEvent(event);
-    await bus.close();
     try {
       await appendResolutionGoal(SCOPE_ID, decision.trim(), summary.trim());
     } catch (err) {
@@ -341,8 +356,7 @@ async function handleEvents(req: IncomingMessage, res: ServerResponse): Promise<
     return;
   }
 
-  const bus = await makeEventBus();
-  await bus.ensureStream(NATS_STREAM, ["swarm.events.>"]);
+  const bus = await getFeedBus();
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -363,7 +377,6 @@ async function handleEvents(req: IncomingMessage, res: ServerResponse): Promise<
   };
   res.write(`id: 0\ndata: ${JSON.stringify(connected)}\n\n`);
 
-  const consumer = `feed-sse-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   let sub: PushSubscription | null = null;
   const keepalive = setInterval(() => {
     if (res.writableEnded) {
@@ -379,7 +392,8 @@ async function handleEvents(req: IncomingMessage, res: ServerResponse): Promise<
     res.write(line);
   };
 
-  sub = await bus.subscribe(NATS_STREAM, "swarm.events.>", consumer, onMessage);
+  // Ephemeral consumer: no durable name → no accumulation in NATS when clients disconnect
+  sub = await bus.subscribeEphemeral(NATS_STREAM, "swarm.events.>", onMessage);
 
   req.on("close", () => {
     clearInterval(keepalive);
@@ -870,6 +884,15 @@ async function main(): Promise<void> {
       if (req.method === "GET" && pathname === "/convergence") {
         if (!requireBearer(req, res)) return;
         await handleConvergence(req, res);
+        return;
+      }
+      if (req.method === "GET" && pathname === "/health") {
+        try {
+          await getPool().query("SELECT 1");
+          sendJson(res, 200, { status: "ok", pg: "connected" });
+        } catch (e) {
+          sendJson(res, 503, { status: "unhealthy", pg: toErrorString(e) });
+        }
         return;
       }
       await handleEvents(req, res);

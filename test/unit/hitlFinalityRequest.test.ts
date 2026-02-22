@@ -31,6 +31,11 @@ function createFakeMitlPool(): import("pg").Pool {
         if (!row) return { rows: [], rowCount: 0 };
         return { rows: [{ proposal: row.proposal, action_payload: row.action_payload }], rowCount: 1 };
       }
+      if (text.includes("SELECT 1 FROM mitl_pending") && text.includes("LIKE")) {
+        const prefix = (values?.[0] as string) ?? "";
+        const has = Array.from(store.keys()).some((k) => k.startsWith(prefix.replace(/%$/, "")));
+        return { rows: has ? [{}] : [], rowCount: has ? 1 : 0 };
+      }
       if (text.includes("DELETE FROM mitl_pending")) {
         const id = values?.[0];
         if (id) store.delete(String(id));
@@ -97,5 +102,32 @@ describe("hitlFinalityRequest", () => {
     expect((pending[0].proposal.payload as Record<string, unknown>).dimension_breakdown).toEqual([]);
     expect((pending[0].proposal.payload as Record<string, unknown>).blockers).toHaveLength(1);
     expect(Array.isArray((pending[0].proposal.payload as Record<string, unknown>).suggested_actions)).toBe(true);
+  });
+
+  it("submitFinalityReviewForScope returns true without adding when scope already has pending finality review", async () => {
+    vi.mocked(evaluateFinality).mockResolvedValue({
+      kind: "review",
+      request: {
+        type: "finality_review",
+        scope_id: "scope-1",
+        goal_score: 0.8,
+        near_threshold: 0.75,
+        auto_threshold: 0.92,
+        gap: 0.12,
+        dimension_breakdown: [],
+        blockers: [],
+        llm_explanation: "",
+        suggested_actions: [],
+        options: [],
+      },
+    });
+    const out1 = await submitFinalityReviewForScope("scope-1");
+    expect(out1).toBe(true);
+    const pendingAfterFirst = await getPending();
+    expect(pendingAfterFirst).toHaveLength(1);
+    const out2 = await submitFinalityReviewForScope("scope-1");
+    expect(out2).toBe(true);
+    const pendingAfterSecond = await getPending();
+    expect(pendingAfterSecond).toHaveLength(1);
   });
 });

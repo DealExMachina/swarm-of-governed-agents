@@ -1,6 +1,6 @@
 import pg from "pg";
 import type { FinalitySnapshot } from "./finalityEvaluator.js";
-import { getPool } from "./db.js";
+import { getPool, runInTransaction } from "./db.js";
 
 export interface SemanticNode {
   node_id: string;
@@ -43,23 +43,8 @@ export interface AppendNodeInput {
 
 type Queryable = pg.Pool | pg.PoolClient;
 
-export async function runInTransaction<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
-  const pool = getPool();
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const result = await fn(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (e) {
-    await client.query("ROLLBACK").catch(() => {});
-    const msg = e instanceof Error ? e.message : (e as Record<string, unknown>)?.message;
-    const code = (e as Record<string, unknown>)?.code;
-    throw new Error(`runInTransaction: ${msg ?? code ?? String(e)}`);
-  } finally {
-    client.release();
-  }
-}
+// runInTransaction is now imported from db.ts — re-export for backward compatibility
+export { runInTransaction } from "./db.js";
 
 /** Delete nodes (and their edges via FK CASCADE) by scope and created_by. Returns deleted count. */
 export async function deleteNodesBySource(
