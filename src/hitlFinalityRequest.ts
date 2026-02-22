@@ -125,6 +125,11 @@ export async function submitFinalityReviewForScope(
   scopeId: string,
   preComputedReview?: FinalityResult,
 ): Promise<boolean> {
+  const { hasPendingFinalityReviewForScope } = await import("./mitlServer.js");
+  if (await hasPendingFinalityReviewForScope(scopeId)) {
+    return true; // idempotent: review already pending for this scope
+  }
+
   const result =
     preComputedReview?.kind === "review" ? preComputedReview : await evaluateFinality(scopeId);
   if (!result || result.kind !== "review") return false;

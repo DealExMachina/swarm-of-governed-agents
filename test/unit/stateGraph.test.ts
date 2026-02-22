@@ -61,15 +61,22 @@ describe("stateGraph (pure)", () => {
 describe("stateGraph (Postgres-backed)", () => {
   function mockPool(overrides?: (text: string, values?: any[]) => any) {
     const calls: Array<{ text: string; values: any[] }> = [];
+    const queryFn = vi.fn(async (text: string, values?: any[]) => {
+      calls.push({ text, values: values ?? [] });
+      if (overrides) {
+        const result = overrides(text, values);
+        if (result !== undefined) return result;
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    // Mock client for runInTransaction (pool.connect() → client with query/release)
+    const mockClient = {
+      query: queryFn,
+      release: vi.fn(),
+    };
     const pool = {
-      query: vi.fn(async (text: string, values?: any[]) => {
-        calls.push({ text, values: values ?? [] });
-        if (overrides) {
-          const result = overrides(text, values);
-          if (result !== undefined) return result;
-        }
-        return { rows: [], rowCount: 0 };
-      }),
+      query: queryFn,
+      connect: vi.fn(async () => mockClient),
     };
     return { pool: pool as any, calls };
   }

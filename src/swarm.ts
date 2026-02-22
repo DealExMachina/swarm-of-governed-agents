@@ -8,6 +8,7 @@ import { makeEventBus, type EventBus } from "./eventBus.js";
 import { waitForNatsAndStream } from "./readiness.js";
 import { logger, setLogContext } from "./logger.js";
 import { toErrorString } from "./errors.js";
+import { drainPool } from "./db.js";
 import { runGovernanceAgentLoop } from "./agents/governanceAgent.js";
 import { runActionExecutor } from "./actionExecutor.js";
 import { runAgentLoop } from "./agentLoop.js";
@@ -31,6 +32,39 @@ const STREAM_SUBJECTS = [
 
 setLogContext({ agent_id: AGENT_ID, role: ROLE });
 
+// ── Graceful shutdown ────────────────────────────────────────────────────────
+
+const shutdownController = new AbortController();
+const shutdownSignal = shutdownController.signal;
+let _bus: EventBus | null = null;
+const SHUTDOWN_GRACE_MS = 10000; // 10s for in-flight handlers to finish
+
+function onShutdownSignal(sig: string) {
+  logger.info("shutdown signal received, draining...", { signal: sig });
+  shutdownController.abort();
+
+  // Give in-flight handlers time to finish, then force-close resources
+  setTimeout(async () => {
+    try {
+      if (_bus) await _bus.close();
+    } catch (e) {
+      logger.error("bus close error", { error: toErrorString(e) });
+    }
+    try {
+      await drainPool();
+    } catch (e) {
+      logger.error("pool drain error", { error: toErrorString(e) });
+    }
+    logger.info("graceful shutdown complete");
+    process.exit(0);
+  }, SHUTDOWN_GRACE_MS);
+}
+
+process.on("SIGTERM", () => onShutdownSignal("SIGTERM"));
+process.on("SIGINT", () => onShutdownSignal("SIGINT"));
+
+// ── Main ─────────────────────────────────────────────────────────────────────
+
 async function bootstrap(bus: EventBus): Promise<void> {
   const jobSubjects = ["swarm.jobs.extract_facts", "swarm.jobs.check_drift", "swarm.jobs.plan_actions", "swarm.jobs.summarize_status"];
   for (const subj of jobSubjects) {
@@ -53,6 +87,7 @@ async function main(): Promise<void> {
   });
   const s3 = makeS3();
   const bus = await makeEventBus();
+  _bus = bus; // Store reference for shutdown handler
   await bus.ensureStream(NATS_STREAM, STREAM_SUBJECTS);
   await initState(SCOPE_ID, randomUUID());
 
@@ -61,10 +96,12 @@ async function main(): Promise<void> {
   }
 
   if (ROLE === "governance") {
-    await runGovernanceAgentLoop(bus, s3, BUCKET);
+    await runGovernanceAgentLoop(bus, s3, BUCKET, shutdownSignal);
+    return; // governance loop exits on signal; don't fall through to runAgentLoop
   }
   if (ROLE === "executor") {
-    await runActionExecutor(bus);
+    await runActionExecutor(bus, shutdownSignal);
+    return;
   }
 
   const spec = getSpec(ROLE);
@@ -77,6 +114,7 @@ async function main(): Promise<void> {
     await runTunerAgentLoop(s3, BUCKET, async (type, payload) => {
       await bus.publishEvent(createSwarmEvent(type, payload, { source: "tuner" }));
     });
+    return;
   }
 
   await runAgentLoop({
@@ -87,6 +125,7 @@ async function main(): Promise<void> {
     agentId: AGENT_ID,
     role: ROLE,
     scopeId: SCOPE_ID,
+    signal: shutdownSignal,
   });
 }
 

@@ -88,7 +88,12 @@ export async function ensureStreamIdempotent(
     // stream not found, try to add
   }
   try {
-    await jsm.streams.add({ name: streamName, subjects });
+    await jsm.streams.add({
+      name: streamName,
+      subjects,
+      max_age: 7 * 24 * 60 * 60 * 1e9,   // 7 days in nanoseconds
+      max_bytes: 500 * 1024 * 1024,         // 500 MB
+    });
     return;
   } catch (addErr) {
     try {

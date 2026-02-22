@@ -14,6 +14,10 @@ import type { Action } from "./events.js";
 import { createSwarmEvent } from "./events.js";
 import { recordFinalityDecision } from "./finalityDecisions.js";
 import type { FinalityOption } from "./finalityDecisions.js";
+import { CircuitBreaker } from "./resilience.js";
+
+/** LLM circuit breaker: opens after 3 consecutive failures, 60s cooldown. */
+const llmBreaker = new CircuitBreaker("executor-llm", 3, 60000);
 
 const BUCKET = process.env.S3_BUCKET ?? "swarm-facts";
 const NATS_STREAM = process.env.NATS_STREAM ?? "SWARM_JOBS";
@@ -180,7 +184,13 @@ async function processActionWithAgent(action: Action, bus: EventBus, s3: ReturnT
   const abortController = new AbortController();
   const timeoutId = setTimeout(() => abortController.abort(), 30000);
   try {
-    await agent.generate(prompt, { maxSteps: 10, abortSignal: abortController.signal });
+    await llmBreaker.call(() => agent.generate(prompt, { maxSteps: 10, abortSignal: abortController.signal }));
+  } catch (e) {
+    logger.warn("executor LLM failed or circuit open; falling back to inline execution", {
+      proposal_id: action.proposal_id,
+      error: String(e),
+    });
+    await executeActionInline(action, bus, s3, bucket);
   } finally {
     clearTimeout(timeoutId);
   }
@@ -246,14 +256,14 @@ async function executeActionInline(
   }
 }
 
-export async function runActionExecutor(bus: EventBus): Promise<void> {
+export async function runActionExecutor(bus: EventBus, signal?: AbortSignal): Promise<void> {
   const s3 = makeS3();
   const subject = "swarm.actions.>";
   const consumer = `executor-${AGENT_ID}`;
 
   logger.info("action executor started", { subject, consumer });
 
-  while (true) {
+  while (!signal?.aborted) {
     const processed = await bus.consume(
       NATS_STREAM,
       subject,
@@ -289,4 +299,5 @@ export async function runActionExecutor(bus: EventBus): Promise<void> {
       await new Promise((r) => setTimeout(r, 500));
     }
   }
+  logger.info("action executor stopped (shutdown signal)");
 }

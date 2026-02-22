@@ -56,6 +56,8 @@ export interface AgentLoopOptions {
   agentId: string;
   role: string;
   scopeId?: string;
+  /** Abort signal for graceful shutdown — loop exits when aborted. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -154,7 +156,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const BACKOFF_MAX_MS = 5000;
   let delayMs = BACKOFF_MS;
 
-  while (true) {
+  const signal = opts.signal;
+
+  while (!signal?.aborted) {
     const processed = await bus.consume(
       stream,
       subject,
@@ -169,4 +173,5 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       delayMs = BACKOFF_MS;
     }
   }
+  logger.info("agent loop stopped (shutdown signal)", { role });
 }

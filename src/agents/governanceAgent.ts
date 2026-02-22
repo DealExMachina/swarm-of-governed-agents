@@ -51,6 +51,10 @@ export type GovernancePath =
   | "processProposalWithAgent";
 import { evaluateFinality } from "../finalityEvaluator.js";
 import { submitFinalityReviewForScope } from "../hitlFinalityRequest.js";
+import { CircuitBreaker } from "../resilience.js";
+
+/** LLM circuit breaker: opens after 3 consecutive failures, 60s cooldown. */
+const llmBreaker = new CircuitBreaker("governance-llm", 3, 60000);
 
 const AGENT_ID = process.env.AGENT_ID ?? "governance-1";
 const NATS_STREAM = process.env.NATS_STREAM ?? "SWARM_JOBS";
@@ -176,7 +180,18 @@ export async function runOversightAgent(
   const timeoutId = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
   setMaxListeners(64, abortController.signal);
   try {
-    await agent.generate(prompt, { maxSteps: 5, abortSignal: abortController.signal });
+    await llmBreaker.call(() => agent.generate(prompt, { maxSteps: 5, abortSignal: abortController.signal }));
+  } catch (e) {
+    // If circuit breaker is open or LLM failed, fall back to deterministic
+    if (!getChosen()) {
+      logger.warn("oversight LLM failed or circuit open; committing deterministic result", {
+        proposal_id: proposal.proposal_id,
+        error: String(e),
+      });
+      await commitDeterministicResult(proposal, deterministicResult, env, "oversight_acceptDeterministic");
+      return;
+    }
+    throw e;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -398,7 +413,18 @@ export async function processProposalWithAgent(
   const timeoutId = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
   setMaxListeners(64, abortController.signal);
   try {
-    await agent.generate(prompt, { maxSteps: 12, abortSignal: abortController.signal });
+    await llmBreaker.call(() => agent.generate(prompt, { maxSteps: 12, abortSignal: abortController.signal }));
+  } catch (e) {
+    // If circuit breaker is open or LLM failed, fall back to deterministic
+    if (!tools.isDecided()) {
+      logger.warn("governance LLM failed or circuit open; falling back to rule-based", {
+        proposal_id: proposal.proposal_id,
+        error: String(e),
+      });
+      await processProposal(proposal, env);
+      return;
+    }
+    throw e;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -591,12 +617,12 @@ export async function runFinalityCheck(scopeId: string): Promise<void> {
 }
 
 /** Dedicated consumer for swarm.finality.evaluate; acks only after runFinalityCheck succeeds (retry on failure). */
-async function runFinalityConsumerLoop(bus: EventBus): Promise<never> {
+async function runFinalityConsumerLoop(bus: EventBus, signal?: AbortSignal): Promise<void> {
   const stream = process.env.NATS_STREAM ?? "SWARM_JOBS";
   const subject = "swarm.finality.evaluate";
   const consumer = "finality-evaluator";
   logger.info("finality consumer started", { subject, consumer });
-  while (true) {
+  while (!signal?.aborted) {
     const processed = await bus.consume(
       stream,
       subject,
@@ -611,9 +637,10 @@ async function runFinalityConsumerLoop(bus: EventBus): Promise<never> {
       await new Promise((r) => setTimeout(r, 500));
     }
   }
+  logger.info("finality consumer stopped (shutdown signal)");
 }
 
-export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket: string): Promise<never> {
+export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket: string, signal?: AbortSignal): Promise<void> {
   const { setMitlPublishFns, startMitlServer } = await import("../mitlServer.js");
   const mitlPort = parseInt(process.env.MITL_PORT ?? "3001", 10);
   setMitlPublishFns(
@@ -622,7 +649,7 @@ export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket
   );
   startMitlServer(mitlPort);
 
-  void runFinalityConsumerLoop(bus);
+  void runFinalityConsumerLoop(bus, signal);
 
   const subject = "swarm.proposals.>";
   const consumer = `governance-${AGENT_ID}`;
@@ -641,7 +668,7 @@ export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket
       bus.publish(subj, data as Record<string, string>).then(() => {}),
   };
 
-  while (true) {
+  while (!signal?.aborted) {
     const processed = await bus.consume(
       NATS_STREAM,
       subject,
@@ -679,4 +706,5 @@ export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket
       delayMs = BACKOFF_MS;
     }
   }
+  logger.info("governance agent stopped (shutdown signal)");
 }
