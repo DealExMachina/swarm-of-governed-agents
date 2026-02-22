@@ -39,14 +39,14 @@ flowchart TB
   end
 
   subgraph Shared["Shared state"]
-    WAL[Postgres WAL\ncontext_events]
-    S3[S3\nfacts / drift / history]
-    SG[Semantic graph\nnodes + edges\nPostgres + pgvector]
+    WAL[Postgres WAL context_events]
+    S3[S3 facts drift history]
+    SG[Semantic graph nodes edges pgvector]
   end
 
   subgraph Control["Control loop"]
-    GOV[Governance Agent\napprove / reject / escalate]
-    FIN[Finality Evaluator\nV(t), monotonicity,\nplateau, HITL]
+    GOV[Governance Agent approve reject escalate]
+    FIN[Finality Evaluator V monotonicity plateau HITL]
   end
 
   NATS --> FA & DA & PA & SA

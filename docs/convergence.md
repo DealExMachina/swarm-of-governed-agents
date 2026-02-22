@@ -43,7 +43,7 @@ flowchart LR
     H[History]
   end
   subgraph mech["Mechanisms"]
-    V[V(t) Lyapunov]
+    V[V Lyapunov]
     ALPHA[Convergence rate alpha]
     MONO[Monotonicity gate]
     PLAT[Plateau detection]

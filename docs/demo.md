@@ -63,10 +63,10 @@ Open [http://localhost:3003](http://localhost:3003) to begin the walkthrough.
 
 ```mermaid
 flowchart LR
-  D1[Doc 1\nAnalyst Briefing] --> D2[Doc 2\nFinancial DD]
-  D2 --> D3[Doc 3\nTechnical]
-  D3 --> D4[Doc 4\nMarket Intel]
-  D4 --> D5[Doc 5\nLegal Review]
+  D1[Doc 1 Analyst Briefing] --> D2[Doc 2 Financial DD]
+  D2 --> D3[Doc 3 Technical]
+  D3 --> D4[Doc 4 Market Intel]
+  D4 --> D5[Doc 5 Legal Review]
   D2 -.->|high drift: block| BLOCK[Governance blocks]
   D5 -.->|near-finality| HITL[HITL review queued]
 ```

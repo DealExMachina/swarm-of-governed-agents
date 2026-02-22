@@ -14,9 +14,9 @@ and where assumptions begin.
 ```mermaid
 flowchart TB
   subgraph tested["Tested / validated"]
-    U[Unit tests\nVitest, 196+]
-    BENCH[Convergence benchmark\n7 scenarios, pure math]
-    E2E[E2E pipeline\nrun-e2e.sh, manual]
+    U[Unit tests Vitest 196+]
+    BENCH[Convergence benchmark 7 scenarios]
+    E2E[E2E pipeline run-e2e.sh manual]
   end
   subgraph theoretical["Theoretical / assumed"]
     T1[Concurrent CAS contention]
