@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const mockQuery = vi.fn();
 vi.mock("pg", () => ({
   default: {
-    Pool: vi.fn().mockImplementation(() => ({ query: mockQuery })),
+    Pool: vi.fn().mockImplementation(() => ({ query: mockQuery, on: vi.fn(), end: vi.fn() })),
   },
 }));
 

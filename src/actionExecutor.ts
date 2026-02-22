@@ -6,7 +6,7 @@ import { Agent } from "@mastra/core/agent";
 import { makeS3, s3GetText } from "./s3.js";
 import { advanceState, loadState, transitions, type Node, type GraphState } from "./stateGraph.js";
 import { getNextJobForNode } from "./agentRegistry.js";
-import { loadPolicies } from "./governance.js";
+import { loadPolicies, getGovernanceForScope } from "./governance.js";
 import type { EventBus } from "./eventBus.js";
 import { logger, setLogContext } from "./logger.js";
 import { getChatModelConfig } from "./modelConfig.js";
@@ -55,7 +55,8 @@ function createExecutorTools(
       }).nullable(),
     }),
     execute: async () => {
-      const state = await loadState();
+      const scopeId = (action.payload as { scope_id?: string })?.scope_id ?? process.env.SCOPE_ID ?? "default";
+      const state = await loadState(scopeId);
       return { state };
     },
   });
@@ -87,17 +88,27 @@ function createExecutorTools(
       error: z.string().optional(),
     }),
     execute: async () => {
-      const payload = action.payload as { expectedEpoch: number; from?: string; to?: string } | undefined;
+      const payload = action.payload as { expectedEpoch: number; from?: string; to?: string; scope_id?: string } | undefined;
       if (!payload?.expectedEpoch) {
         return { ok: false, newState: null, error: "missing_payload" };
       }
-      const governance = loadPolicies(govPath);
+      const scopeId = payload.scope_id ?? process.env.SCOPE_ID ?? "default";
+      const governance = getGovernanceForScope(scopeId, loadPolicies(govPath));
       const driftRaw = await s3GetText(s3, bucket, "drift/latest.json");
       const drift = driftRaw
         ? (JSON.parse(driftRaw) as { level: string; types: string[] })
         : { level: "none", types: [] as string[] };
-      const newState = await advanceState(payload.expectedEpoch, { drift, governance });
+      const newState = await advanceState(payload.expectedEpoch, { scopeId, drift, governance });
       if (!newState) {
+        const current = await loadState(scopeId);
+        if (current && current.epoch > payload.expectedEpoch) {
+          logger.info("executor advance skipped (state already advanced)", {
+            proposal_id: action.proposal_id,
+            expectedEpoch: payload.expectedEpoch,
+            currentEpoch: current.epoch,
+          });
+          return { ok: true, newState: current as unknown as Record<string, unknown> };
+        }
         logger.warn("executor advance failed", { proposal_id: action.proposal_id });
         return { ok: false, newState: null, error: "advance_failed" };
       }
@@ -166,7 +177,13 @@ async function processActionWithAgent(action: Action, bus: EventBus, s3: ReturnT
     },
   });
   const prompt = `Approved action: proposal_id=${action.proposal_id} payload=${JSON.stringify(action.payload)}. Decide whether to execute or decline and call the corresponding tool.`;
-  await agent.generate(prompt, { maxSteps: 10 });
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(() => abortController.abort(), 30000);
+  try {
+    await agent.generate(prompt, { maxSteps: 10, abortSignal: abortController.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function executeActionInline(
@@ -178,25 +195,36 @@ async function executeActionInline(
   if (action.result !== "approved" || !action.payload) return;
   const actionType = (action as Action & { action_type?: string }).action_type;
   if (actionType !== "advance_state") return;
-  const { expectedEpoch } = action.payload as { expectedEpoch: number };
+  const payload = action.payload as { expectedEpoch: number; scope_id?: string };
+  const { expectedEpoch } = payload;
+  const scopeId = payload.scope_id ?? process.env.SCOPE_ID ?? "default";
   const isHumanOverride = action.approved_by === "human";
   // #region agent log
   fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'executor:executeActionInline',message:'executing',data:{proposal_id:action.proposal_id,isHumanOverride,expectedEpoch,approved_by:action.approved_by},timestamp:Date.now()})}).catch(()=>{});
   // #endregion
   let newState: GraphState | null;
   if (isHumanOverride) {
-    newState = await advanceState(expectedEpoch);
+    newState = await advanceState(expectedEpoch, { scopeId });
     logger.info("human-approved override, skipping governance re-check", { proposal_id: action.proposal_id });
   } else {
     const govPath = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
-    const governance = loadPolicies(govPath);
+    const governance = getGovernanceForScope(scopeId, loadPolicies(govPath));
     const driftRaw = await s3GetText(s3, bucket, "drift/latest.json");
     const drift = driftRaw
       ? (JSON.parse(driftRaw) as { level: string; types: string[] })
       : { level: "none", types: [] as string[] };
-    newState = await advanceState(expectedEpoch, { drift, governance });
+    newState = await advanceState(expectedEpoch, { scopeId, drift, governance });
   }
   if (!newState) {
+    const current = await loadState(scopeId);
+    if (current && current.epoch > expectedEpoch) {
+      logger.info("executor advance skipped (state already advanced)", {
+        proposal_id: action.proposal_id,
+        expectedEpoch,
+        currentEpoch: current.epoch,
+      });
+      return;
+    }
     logger.warn("executor advance failed", { proposal_id: action.proposal_id });
     return;
   }

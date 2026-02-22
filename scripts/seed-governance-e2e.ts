@@ -39,18 +39,20 @@ const EPOCH = 5;
 const FROM = "DriftChecked";
 const TO = "ContextIngested";
 
+const SCOPE_ID = process.env.SCOPE_ID ?? "default";
+
 async function ensureState(pool: pg.Pool): Promise<void> {
   await ensureStateTable(pool);
-  const existing = await loadState(pool);
+  const existing = await loadState(SCOPE_ID, pool);
   if (existing && existing.epoch === EPOCH && existing.lastNode === FROM) {
     console.log("State already at", FROM, "epoch", EPOCH);
     return;
   }
   await pool.query(
-    `INSERT INTO swarm_state (id, run_id, last_node, epoch, updated_at)
-     VALUES ('singleton', $1, $2, $3, now())
-     ON CONFLICT (id) DO UPDATE SET run_id = $1, last_node = $2, epoch = $3, updated_at = now()`,
-    [RUN_ID, FROM, EPOCH],
+    `INSERT INTO swarm_state (scope_id, run_id, last_node, epoch, updated_at)
+     VALUES ($1, $2, $3, $4, now())
+     ON CONFLICT (scope_id) DO UPDATE SET run_id = $2, last_node = $3, epoch = $4, updated_at = now()`,
+    [SCOPE_ID, RUN_ID, FROM, EPOCH],
   );
   console.log("State set to", FROM, "epoch", EPOCH, "runId", RUN_ID);
 }

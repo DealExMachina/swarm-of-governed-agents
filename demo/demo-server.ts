@@ -31,6 +31,14 @@ const DEMO_PORT = parseInt(process.env.DEMO_PORT ?? "3003", 10);
 const FEED_URL = (process.env.FEED_URL ?? "http://127.0.0.1:3002").replace(/\/$/, "");
 const MITL_URL = (process.env.MITL_URL ?? "http://127.0.0.1:3001").replace(/\/$/, "");
 const DOCS_DIR = join(__dirname, "scenario", "docs");
+const SWARM_API_TOKEN = process.env.SWARM_API_TOKEN ?? "";
+
+function authHeaders(): Record<string, string> {
+  if (SWARM_API_TOKEN) {
+    return { Authorization: `Bearer ${SWARM_API_TOKEN}` };
+  }
+  return {};
+}
 
 // ---------------------------------------------------------------------------
 // Load demo documents at startup
@@ -55,6 +63,8 @@ const DEMO_DOCS: DemoDoc[] = readdirSync(DOCS_DIR)
     return { index, filename, title, body, excerpt };
   });
 
+const fedSteps = new Set<number>();
+
 // ---------------------------------------------------------------------------
 // SSE proxy: forward feed server events to connected demo UI clients
 // ---------------------------------------------------------------------------
@@ -72,7 +82,7 @@ function startSseProxy(): void {
       port: feedEventUrl.port || 80,
       path: feedEventUrl.pathname,
       method: "GET",
-      headers: { Accept: "text/event-stream", "Cache-Control": "no-cache" },
+      headers: { Accept: "text/event-stream", "Cache-Control": "no-cache", ...authHeaders() },
     },
     (res) => {
       // #region agent log
@@ -133,14 +143,14 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
 }
 
 async function proxyGet(url: string): Promise<unknown> {
-  const r = await fetch(url);
+  const r = await fetch(url, { headers: authHeaders() });
   return r.json();
 }
 
 async function proxyPost(url: string, body: unknown): Promise<unknown> {
   const r = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
   return r.json();
@@ -166,6 +176,10 @@ function handleDocs(res: ServerResponse): void {
 
 /** POST /api/step/:n — feed document n to the swarm feed server */
 async function handleStep(n: number, res: ServerResponse): Promise<void> {
+  if (fedSteps.has(n)) {
+    sendJson(res, 200, { ok: true, already_fed: true, doc: { index: n, title: DEMO_DOCS[n]?.title } });
+    return;
+  }
   const doc = DEMO_DOCS[n];
   if (!doc) {
     sendJson(res, 404, { error: `No document at index ${n}` });
@@ -176,6 +190,7 @@ async function handleStep(n: number, res: ServerResponse): Promise<void> {
       title: doc.title,
       body: doc.body,
     });
+    fedSteps.add(n);
     sendJson(res, 200, { ok: true, doc: { index: n, title: doc.title }, feed: result });
   } catch (e) {
     sendJson(res, 502, { error: String(e) });
@@ -894,7 +909,22 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
         '<div class="step-summary-body">' + escHtml(step.insight) + '</div>' +
       '</div>'
     );
-    setTimeout(feedNextStep, 2500);
+    // After any step, check if a finality review is already pending (e.g. goal score hit 75%).
+    fetch('/api/pending').then(function(r) { return r.json(); }).then(function(data) {
+      var pending = (data.pending || []).filter(function(item) {
+        var prop = item.proposal || {};
+        var pl = prop.payload || {};
+        return (pl.type === 'finality_review' || prop.proposed_action === 'finality_review') && !initialPendingIds.has(item.proposal_id);
+      });
+      if (pending.length > 0) {
+        setTlState(5, 'hitl');
+        setTimeout(function() { showHitlPanel(pending[0]); }, 1500);
+        return;
+      }
+      setTimeout(feedNextStep, 2500);
+    }).catch(function() {
+      setTimeout(feedNextStep, 2500);
+    });
   }
 
   // ── Governance HITL (mid-step) ──

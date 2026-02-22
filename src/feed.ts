@@ -14,10 +14,12 @@ import { tailEvents } from "./contextWal.js";
 import { makeS3 } from "./s3.js";
 import { s3GetText } from "./s3.js";
 import { toErrorString } from "./errors.js";
-import { loadPolicies, evaluateRules } from "./governance.js";
+import { loadPolicies, getGovernanceForScope, evaluateRules } from "./governance.js";
 import { evaluateFinality, computeGoalScoreForScope, loadFinalityConfig, loadFinalitySnapshot } from "./finalityEvaluator.js";
+import { getConvergenceState, type ConvergenceState } from "./convergenceTracker.js";
 import { getGraphSummary, appendResolutionGoal } from "./semanticGraph.js";
 import { getLatestFinalityDecision } from "./finalityDecisions.js";
+import { requireBearer } from "./auth.js";
 
 const FEED_PORT = parseInt(process.env.FEED_PORT ?? "3002", 10);
 const NATS_STREAM = process.env.NATS_STREAM ?? "SWARM_JOBS";
@@ -176,7 +178,7 @@ async function handleFinalityResponse(req: IncomingMessage, res: ServerResponse)
 /** GET /summary: state, facts summary, drift, and recent pipeline events for demo output. */
 async function handleSummary(res: ServerResponse): Promise<void> {
   try {
-    const state = await loadState();
+    const state = await loadState(SCOPE_ID);
     const recent = await tailEvents(20);
     let facts: Record<string, unknown> | null = null;
     let drift: Record<string, unknown> | null = null;
@@ -210,7 +212,7 @@ async function handleSummary(res: ServerResponse): Promise<void> {
         const notes = (drift.notes as string[]) ?? [];
         let suggested_actions: string[] = [];
         try {
-          const config = loadPolicies(GOVERNANCE_PATH);
+          const config = getGovernanceForScope(SCOPE_ID, loadPolicies(GOVERNANCE_PATH));
           suggested_actions = evaluateRules({ level, types }, config);
         } catch {
           // governance file optional for summary
@@ -242,6 +244,29 @@ async function handleSummary(res: ServerResponse): Promise<void> {
           } catch {
             // table may not exist
           }
+          // Convergence data (graceful degradation)
+          let convergence: Record<string, unknown> | null = null;
+          try {
+            const convConfig = config.convergence ?? {};
+            const convState: ConvergenceState = await getConvergenceState(SCOPE_ID, convConfig, auto);
+            convergence = {
+              rate: convState.convergence_rate,
+              estimated_rounds: convState.estimated_rounds,
+              is_plateaued: convState.is_plateaued,
+              plateau_rounds: convState.plateau_rounds,
+              lyapunov_v: convState.history.length > 0 ? convState.history[convState.history.length - 1].lyapunov_v : null,
+              highest_pressure: convState.highest_pressure_dimension,
+              is_monotonic: convState.is_monotonic,
+              history: convState.history.map((p) => ({
+                epoch: p.epoch,
+                score: p.goal_score,
+                v: p.lyapunov_v,
+              })),
+            };
+          } catch {
+            // convergence_history table may not exist
+          }
+
           return {
             goal_score: Math.round(goal_score * 100) / 100,
             status,
@@ -251,6 +276,7 @@ async function handleSummary(res: ServerResponse): Promise<void> {
             dimension_breakdown: result?.kind === "review" ? result.request.dimension_breakdown : null,
             blockers: result?.kind === "review" ? result.request.blockers : null,
             last_decision: last_decision ?? undefined,
+            convergence,
             dimensions: await (async () => {
               try {
                 const snap = await loadFinalitySnapshot(SCOPE_ID);
@@ -278,6 +304,30 @@ async function handleSummary(res: ServerResponse): Promise<void> {
       })(),
     };
     sendJson(res, 200, summary);
+  } catch (e) {
+    sendJson(res, 500, { error: toErrorString(e) });
+  }
+}
+
+/** GET /convergence?scope=<id>: full convergence state for a scope (debugging + benchmark). */
+async function handleConvergence(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const query = getQuery(req.url ?? "");
+    const scopeId = query.scope ?? SCOPE_ID;
+    const config = loadFinalityConfig();
+    const convConfig = config.convergence ?? {};
+    const auto = config.goal_gradient?.auto_finality_threshold ?? 0.92;
+    const convState = await getConvergenceState(scopeId, convConfig, auto);
+    sendJson(res, 200, {
+      scope_id: scopeId,
+      convergence_rate: convState.convergence_rate,
+      estimated_rounds: convState.estimated_rounds,
+      is_monotonic: convState.is_monotonic,
+      is_plateaued: convState.is_plateaued,
+      plateau_rounds: convState.plateau_rounds,
+      highest_pressure_dimension: convState.highest_pressure_dimension,
+      history: convState.history,
+    });
   } catch (e) {
     sendJson(res, 500, { error: toErrorString(e) });
   }
@@ -798,19 +848,28 @@ async function main(): Promise<void> {
         return;
       }
       if (req.method === "POST" && pathname === "/context/docs") {
+        if (!requireBearer(req, res)) return;
         await handleAddDoc(req, res);
         return;
       }
       if (req.method === "POST" && pathname === "/context/resolution") {
+        if (!requireBearer(req, res)) return;
         await handleAddResolution(req, res);
         return;
       }
       if (req.method === "GET" && pathname === "/pending") {
+        if (!requireBearer(req, res)) return;
         await handleGetPending(res);
         return;
       }
       if (req.method === "POST" && pathname === "/finality-response") {
+        if (!requireBearer(req, res)) return;
         await handleFinalityResponse(req, res);
+        return;
+      }
+      if (req.method === "GET" && pathname === "/convergence") {
+        if (!requireBearer(req, res)) return;
+        await handleConvergence(req, res);
         return;
       }
       await handleEvents(req, res);

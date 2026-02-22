@@ -18,6 +18,7 @@ const BUCKET = process.env.S3_BUCKET!;
 const AGENT_ID = process.env.AGENT_ID ?? `agent-${Math.random().toString(16).slice(2, 10)}`;
 const ROLE = process.env.AGENT_ROLE ?? "facts";
 const NATS_STREAM = process.env.NATS_STREAM ?? "SWARM_JOBS";
+const SCOPE_ID = process.env.SCOPE_ID ?? "default";
 
 const STREAM_SUBJECTS = [
   "swarm.jobs.>",
@@ -25,6 +26,7 @@ const STREAM_SUBJECTS = [
   "swarm.actions.>",
   "swarm.rejections.>",
   "swarm.events.>",
+  "swarm.finality.>",
 ];
 
 setLogContext({ agent_id: AGENT_ID, role: ROLE });
@@ -52,7 +54,7 @@ async function main(): Promise<void> {
   const s3 = makeS3();
   const bus = await makeEventBus();
   await bus.ensureStream(NATS_STREAM, STREAM_SUBJECTS);
-  await initState(randomUUID());
+  await initState(SCOPE_ID, randomUUID());
 
   if (process.env.BOOTSTRAP === "1") {
     await bootstrap(bus);
@@ -84,6 +86,7 @@ async function main(): Promise<void> {
     stream: NATS_STREAM,
     agentId: AGENT_ID,
     role: ROLE,
+    scopeId: SCOPE_ID,
   });
 }
 

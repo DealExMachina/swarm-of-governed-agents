@@ -1,5 +1,12 @@
-# Approval mode: YOLO | MITL | MASTER
+# Approval mode: YOLO | MITL | MASTER (default for all scopes)
 mode: YOLO
+
+# Optional per-scope overrides (scope_id -> { mode: ... })
+# scopes:
+#   financial_dd:
+#     mode: MITL
+#   other:
+#     mode: YOLO
 
 rules:
   - when:

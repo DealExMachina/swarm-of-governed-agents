@@ -2,10 +2,13 @@ import type { S3Client } from "@aws-sdk/client-s3";
 import { createTool } from "@mastra/core/tools";
 import { Agent } from "@mastra/core/agent";
 import { z } from "zod";
+import { setMaxListeners } from "events";
 import { getChatModelConfig } from "../modelConfig.js";
 import { logger } from "../logger.js";
 import { s3GetText, s3PutJson } from "../s3.js";
 import { makeReadFactsTool, makeReadFactsHistoryTool, makeReadDriftTool } from "./sharedTools.js";
+
+const DRIFT_LLM_TIMEOUT_MS = 90_000;
 
 const KEY_DRIFT = "drift/latest.json";
 const KEY_DRIFT_HIST = (ts: string) => `drift/history/${ts.replace(/[:.]/g, "-")}.json`;
@@ -88,17 +91,24 @@ export async function runDriftAgent(
           writeDrift,
         },
       });
-      await agent.generate(
-        "Analyze drift: read current facts and history, compare them, then write your drift analysis using writeDrift.",
-        { maxSteps: 10 },
-      );
+      const abortController = new AbortController();
+      const timeoutId = setTimeout(() => abortController.abort(), DRIFT_LLM_TIMEOUT_MS);
+      setMaxListeners(64, abortController.signal);
+      try {
+        await agent.generate(
+          "Analyze drift: read current facts and history, compare them, then write your drift analysis using writeDrift.",
+          { maxSteps: 10, abortSignal: abortController.signal },
+        );
+      } finally {
+        clearTimeout(timeoutId);
+      }
       const driftRaw = await s3GetText(s3, bucket, KEY_DRIFT);
       const drift = driftRaw ? (JSON.parse(driftRaw) as { level: string; types: string[] }) : { level: "none", types: [] };
       return { wrote: [KEY_DRIFT], level: drift.level, types: drift.types };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (/timeout|ECONNREFUSED|API|fetch failed/i.test(msg)) {
-        logger.warn("Mastra/OpenAI unreachable, falling back to direct drift archive", { error: msg });
+      if (/timeout|TIMEOUT|ECONNREFUSED|API|fetch failed|abort/i.test(msg)) {
+        logger.warn("Mastra/OpenAI unreachable or timed out, falling back to direct drift archive", { error: msg });
       } else {
         throw err;
       }

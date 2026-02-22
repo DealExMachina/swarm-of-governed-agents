@@ -79,7 +79,7 @@ describe("stateGraph (Postgres-backed)", () => {
   describe("loadState", () => {
     it("returns null when no state row exists", async () => {
       const { pool } = mockPool();
-      const state = await loadState(pool);
+      const state = await loadState("default", pool);
       expect(state).toBeNull();
     });
 
@@ -92,7 +92,7 @@ describe("stateGraph (Postgres-backed)", () => {
           };
         }
       });
-      const state = await loadState(pool);
+      const state = await loadState("default", pool);
       expect(state).toEqual({
         runId: "r1",
         lastNode: "FactsExtracted",
@@ -116,7 +116,7 @@ describe("stateGraph (Postgres-backed)", () => {
         }
       });
 
-      const result = await advanceState(999, pool);
+      const result = await advanceState(999, undefined, pool);
       expect(result).toBeNull();
     });
 
@@ -139,15 +139,15 @@ describe("stateGraph (Postgres-backed)", () => {
         }
       });
 
-      const result = await advanceState(3, pool);
+      const result = await advanceState(3, undefined, pool);
       expect(result).not.toBeNull();
       expect(result!.lastNode).toBe("FactsExtracted");
       expect(result!.epoch).toBe(4);
 
       const update = calls.find((c) => c.text.includes("UPDATE"));
       expect(update).toBeDefined();
-      expect(update!.text).toContain("WHERE id = 'singleton' AND epoch = $3");
-      expect(update!.values).toEqual(["FactsExtracted", 4, 3]);
+      expect(update!.text).toContain("WHERE scope_id = $3 AND epoch = $4");
+      expect(update!.values).toEqual(["FactsExtracted", 4, "default", 3]);
 
       const eventInsert = calls.find((c) => c.text.includes("INSERT INTO context_events"));
       expect(eventInsert).toBeDefined();
@@ -171,14 +171,14 @@ describe("stateGraph (Postgres-backed)", () => {
         }
       });
 
-      const state = await initState("r-new", "ContextIngested", pool);
+      const state = await initState("default", "r-new", "ContextIngested", pool);
       expect(state.runId).toBe("r-new");
       expect(state.lastNode).toBe("ContextIngested");
       expect(state.epoch).toBe(0);
 
       const insert = calls.find((c) => c.text.includes("INSERT INTO swarm_state"));
       expect(insert).toBeDefined();
-      expect(insert!.text).toContain("ON CONFLICT (id) DO NOTHING");
+      expect(insert!.text).toContain("ON CONFLICT (scope_id) DO NOTHING");
     });
   });
 
@@ -186,7 +186,7 @@ describe("stateGraph (Postgres-backed)", () => {
     it("returns null and does not UPDATE when canTransition blocks (high drift)", async () => {
       const govPath = join(process.cwd(), "governance.yaml");
       const governance = loadPolicies(govPath);
-      const drift = { level: "high", types: [] as string[] };
+      const drift = { level: "critical", types: [] as string[] };
 
       const { pool, calls } = mockPool((text) => {
         if (text.includes("SELECT") && text.includes("swarm_state")) {
@@ -198,7 +198,7 @@ describe("stateGraph (Postgres-backed)", () => {
         return { rows: [], rowCount: 0 };
       });
 
-      const result = await advanceState(5, { drift, governance }, pool);
+      const result = await advanceState(5, { scopeId: "default", drift, governance }, pool);
       expect(result).toBeNull();
 
       const updateCalls = calls.filter((c) => c.text.includes("UPDATE") && c.text.includes("swarm_state"));

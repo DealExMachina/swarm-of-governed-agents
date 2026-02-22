@@ -58,19 +58,29 @@ export interface GoalGradientConfig {
   auto_finality_threshold: number;
 }
 
+export interface ConvergenceYamlConfig {
+  beta?: number;
+  tau?: number;
+  ema_alpha?: number;
+  plateau_threshold?: number;
+  history_depth?: number;
+  divergence_rate?: number;
+}
+
 export interface FinalityConfig {
   goal_gradient?: GoalGradientConfig;
+  convergence?: ConvergenceYamlConfig;
   finality: Record<CaseStatus, FinalityConditionRule>;
 }
 
 const DEFAULT_SNAPSHOT: FinalitySnapshot = {
-  claims_active_min_confidence: 1.0,
+  claims_active_min_confidence: 0,
   claims_active_count: 0,
-  claims_active_avg_confidence: 1.0,
+  claims_active_avg_confidence: 0,
   contradictions_unresolved_count: 0,
   contradictions_total_count: 0,
   risks_critical_active_count: 0,
-  goals_completion_ratio: 1.0,
+  goals_completion_ratio: 0,
   scope_risk_score: 0,
 };
 
@@ -213,6 +223,17 @@ function conditionToString(c: string | Record<string, unknown>): string {
  * Path A: threshold convergence (all conditions met) -> RESOLVED.
  * Path B: goal score in [near, auto) -> return FinalityReviewRequest for HITL.
  */
+export interface ConvergenceData {
+  rate: number;
+  estimated_rounds: number | null;
+  plateau_rounds: number;
+  lyapunov_v: number;
+  highest_pressure: string;
+  is_monotonic: boolean;
+  is_plateaued: boolean;
+  score_history: number[];
+}
+
 export interface FinalityReviewRequest {
   type: "finality_review";
   scope_id: string;
@@ -231,6 +252,7 @@ export interface FinalityReviewRequest {
   llm_explanation: string;
   suggested_actions: string[];
   options: FinalityOption[];
+  convergence?: ConvergenceData;
 }
 
 export type FinalityOption =
@@ -262,12 +284,61 @@ export async function evaluateFinality(scopeId: string): Promise<FinalityResult 
   const auto = config.goal_gradient?.auto_finality_threshold ?? thresholds.autoFinalityThreshold;
   const goalScore = computeGoalScore(snapshot, config.goal_gradient);
 
+  // --- Convergence tracking (graceful degradation if DB unavailable) ---
+  let convergenceData: ConvergenceData | undefined;
+  try {
+    const {
+      computeLyapunovV,
+      computePressure,
+      computeDimensionScores,
+      recordConvergencePoint,
+      getConvergenceState,
+      DEFAULT_CONVERGENCE_CONFIG,
+    } = await import("./convergenceTracker.js");
+
+    const lyapunovV = computeLyapunovV(snapshot, undefined, config.goal_gradient?.weights);
+    const pressure = computePressure(snapshot, config.goal_gradient?.weights);
+    const dimensionScores = computeDimensionScores(snapshot, config.goal_gradient);
+
+    // Record this evaluation cycle
+    const epoch = snapshot.scope_idle_cycles ?? 0; // best available epoch proxy
+    await recordConvergencePoint(scopeId, epoch, goalScore, lyapunovV, dimensionScores, pressure);
+
+    // Analyze convergence state
+    const convConfig = {
+      ...DEFAULT_CONVERGENCE_CONFIG,
+      ...(config.convergence ?? {}),
+    };
+    const convergence = await getConvergenceState(scopeId, convConfig, auto);
+    const divergenceRate = config.convergence?.divergence_rate ?? DEFAULT_CONVERGENCE_CONFIG.divergence_rate;
+
+    convergenceData = {
+      rate: convergence.convergence_rate,
+      estimated_rounds: convergence.estimated_rounds,
+      plateau_rounds: convergence.plateau_rounds,
+      lyapunov_v: lyapunovV,
+      highest_pressure: convergence.highest_pressure_dimension,
+      is_monotonic: convergence.is_monotonic,
+      is_plateaued: convergence.is_plateaued,
+      score_history: convergence.history.map((p) => p.goal_score),
+    };
+
+    // Divergence detection: V is increasing → system moving away from finality
+    if (convergence.convergence_rate < divergenceRate && convergence.history.length >= 3) {
+      return { kind: "status", status: "ESCALATED" };
+    }
+  } catch {
+    // convergence_history table may not exist yet; proceed without convergence data
+  }
+
   // Path A: RESOLVED if all hard conditions hold and goal score >= auto
+  // Monotonicity gate (Aegean): require stable non-decreasing score for β rounds
   const resolvedRule = config.finality?.RESOLVED;
   if (resolvedRule?.conditions?.length) {
     const conditions = resolvedRule.conditions.map(conditionToString);
     const allMet = resolvedRule.mode === "all" && conditions.every((c) => evaluateOne(c, snapshot));
-    if (allMet && goalScore >= auto) {
+    const isMonotonic = convergenceData?.is_monotonic ?? true; // default to true if no convergence data
+    if (allMet && goalScore >= auto && isMonotonic) {
       return { kind: "status", status: "RESOLVED" };
     }
   }
@@ -293,6 +364,7 @@ export async function evaluateFinality(scopeId: string): Promise<FinalityResult 
         { action: "escalate", label: "Escalate to authority" },
         { action: "defer", days: 7, label: "Defer review (7 days)" },
       ],
+      convergence: convergenceData,
     };
     return { kind: "review", request };
   }

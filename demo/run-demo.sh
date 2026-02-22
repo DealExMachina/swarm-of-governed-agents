@@ -20,6 +20,12 @@ FEED_URL="${FEED_URL:-http://localhost:3002}"
 MITL_URL="${MITL_URL:-http://localhost:3001}"
 FAST="${FAST:-false}"
 START_STEP="${START_STEP:-1}"
+# When SWARM_API_TOKEN is set, add Bearer header to curl calls to feed/MITL
+if [ -n "${SWARM_API_TOKEN:-}" ]; then
+  CURL_AUTH=(-H "Authorization: Bearer $SWARM_API_TOKEN")
+else
+  CURL_AUTH=()
+fi
 
 # Parse flags
 for arg in "$@"; do
@@ -113,11 +119,11 @@ check_jq() {
 }
 
 fetch_summary() {
-  curl -s "${FEED_URL}/summary" 2>/dev/null || echo '{"error":"feed_unavailable"}'
+  curl -s "${CURL_AUTH[@]}" "${FEED_URL}/summary" 2>/dev/null || echo '{"error":"feed_unavailable"}'
 }
 
 fetch_pending() {
-  curl -s "${MITL_URL}/pending" 2>/dev/null || echo '{"pending":[]}'
+  curl -s "${CURL_AUTH[@]}" "${MITL_URL}/pending" 2>/dev/null || echo '{"pending":[]}'
 }
 
 show_summary_key_fields() {
@@ -150,7 +156,7 @@ show_summary_key_fields() {
 
 check_services() {
   print_info "Checking feed at ${FEED_URL}..."
-  if ! curl -s --max-time 5 "${FEED_URL}/summary" > /dev/null 2>&1; then
+  if ! curl -s --max-time 5 "${CURL_AUTH[@]}" "${FEED_URL}/summary" > /dev/null 2>&1; then
     echo -e "  ${RED}Feed is not reachable at ${FEED_URL}.${RESET}"
     echo "  Start it with: npm run swarm:all"
     echo "  Or: docker compose up -d && npm run swarm:all"
@@ -181,6 +187,7 @@ feed_document() {
   local response
   response=$(curl -s -X POST "${FEED_URL}/context/docs" \
     -H "Content-Type: application/json" \
+    "${CURL_AUTH[@]}" \
     -d "{\"title\": \"${title}\", \"body\": $(echo "$body" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}" \
     2>/dev/null)
 
@@ -413,13 +420,20 @@ else:
   echo ""
   echo "  To decide from the terminal, replace PROPOSAL_ID below:"
   echo ""
-  echo "  curl -X POST ${FEED_URL}/finality-response \\"
-  echo "    -H 'Content-Type: application/json' \\"
-  echo "    -d '{\"proposal_id\": \"PROPOSAL_ID\", \"option\": \"approve_finality\"}'"
+  if [ -n "${SWARM_API_TOKEN:-}" ]; then
+    echo "  curl -X POST ${FEED_URL}/finality-response \\"
+    echo "    -H 'Content-Type: application/json' \\"
+    echo "    -H \"Authorization: Bearer \$SWARM_API_TOKEN\" \\"
+    echo "    -d '{\"proposal_id\": \"PROPOSAL_ID\", \"option\": \"approve_finality\"}'"
+  else
+    echo "  curl -X POST ${FEED_URL}/finality-response \\"
+    echo "    -H 'Content-Type: application/json' \\"
+    echo "    -d '{\"proposal_id\": \"PROPOSAL_ID\", \"option\": \"approve_finality\"}'"
+  fi
   echo ""
-  echo "  Or use the web UI at: ${FEED_URL}"
+  echo "  Or use the web UI at: http://localhost:3003"
   echo ""
-  print_highlight "For the demo: open ${FEED_URL} in a browser → 'Pending reviews' section → click 'Approve finality'"
+  print_highlight "For the demo: open http://localhost:3003 in a browser → 'Pending reviews' section → click 'Approve finality'"
 
   pause
 fi
@@ -437,8 +451,14 @@ if [ "$START_STEP" -le 7 ]; then
   echo ""
   echo "  Example resolution (run this in a separate terminal or in the web UI):"
   echo ""
-  echo "  curl -X POST ${FEED_URL}/context/resolution \\"
-  echo "    -H 'Content-Type: application/json' \\"
+  if [ -n "${SWARM_API_TOKEN:-}" ]; then
+    echo "  curl -X POST ${FEED_URL}/context/resolution \\"
+    echo "    -H 'Content-Type: application/json' \\"
+    echo "    -H \"Authorization: Bearer \$SWARM_API_TOKEN\" \\"
+  else
+    echo "  curl -X POST ${FEED_URL}/context/resolution \\"
+    echo "    -H 'Content-Type: application/json' \\"
+  fi
   echo "    -d '{"
   echo "      \"decision\": \"Board approved proceeding to exclusivity with NovaTech AG"
   echo "        at a revised offer of €280M. Conditions: (1) Axion Corp settlement"

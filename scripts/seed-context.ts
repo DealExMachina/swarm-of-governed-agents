@@ -1,9 +1,9 @@
 /**
  * Seed the context WAL with one or more events so the facts agent has input to extract from.
- * Run after agents and Postgres are up. Then trigger an extract_facts job (e.g. npm run loadgen -- 1)
+ * Run after agents and Postgres are up. Then trigger an extract_facts job (e.g. pnpm run loadgen -- 1)
  * or wait for the next cycle.
  *
- * Usage: npx ts-node --esm scripts/seed-context.ts [path to text file]
+ * Usage: pnpm run seed -- [path to text file]
  *   If no file: inserts a short sample. If file: reads and inserts one event with file content.
  */
 import "dotenv/config";

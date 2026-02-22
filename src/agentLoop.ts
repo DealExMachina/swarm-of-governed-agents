@@ -11,6 +11,7 @@ import { loadState, transitions } from "./stateGraph.js";
 import { getSpec } from "./agentRegistry.js";
 import { loadFilterConfig, loadAgentMemory, saveAgentMemory, checkFilter, recordActivation } from "./activationFilters.js";
 import { checkPermission } from "./policy.js";
+import { isProcessed, markProcessed } from "./messageDedup.js";
 import { createSwarmEvent } from "./events.js";
 import { toErrorString } from "./errors.js";
 import { logger } from "./logger.js";
@@ -54,13 +55,15 @@ export interface AgentLoopOptions {
   stream: string;
   agentId: string;
   role: string;
+  scopeId?: string;
 }
 
 /**
  * Run the event-driven agent loop. Subscribes to events and processes them; does not return.
  */
 export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
-  const { s3, bucket, bus, stream, agentId, role } = opts;
+  const { s3, bucket, bus, stream, agentId, role, scopeId: optsScopeId } = opts;
+  const scopeId = optsScopeId ?? process.env.SCOPE_ID ?? "default";
   const spec = getSpec(role);
   if (!spec) {
     logger.error("unknown agent role", { role });
@@ -79,7 +82,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
   await bus.ensureStream(stream, [subject]);
 
-  async function handleMessage(_msg: { id: string; data: Record<string, unknown> }): Promise<void> {
+  async function handleMessage(msg: { id: string; data: Record<string, unknown> }): Promise<void> {
+    if (await isProcessed(consumer, msg.id)) {
+      return;
+    }
     const startMs = Date.now();
     try {
       const config = await loadFilterConfig(role);
@@ -87,8 +93,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       const filterCtx = { s3, bucket };
       const activation = await checkFilter(config, memory, filterCtx);
       if (!activation.shouldActivate) {
+        logger.debug("filter rejected", { role, reason: activation.reason, ...activation.context });
         return;
       }
+      logger.info("filter activated", { role, reason: activation.reason });
 
       const permitted = await checkPermission(agentId, "writer", s.targetNode);
       if (!permitted.allowed) {
@@ -114,7 +122,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       await saveAgentMemory(role, memUpdate);
 
       if (s.proposesAdvance && s.advancesTo) {
-        const stateBefore = await loadState();
+        const stateBefore = await loadState(scopeId);
         if (stateBefore) {
           const to = transitions[stateBefore.lastNode];
           const proposal = {
@@ -134,12 +142,17 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           logger.info("proposal emitted", { proposal_id: proposal.proposal_id, job_type: s.jobType });
         }
       }
+      await markProcessed(consumer, msg.id);
     } catch (err) {
       logger.error("agent loop error", { role, error: toErrorString(err) });
     }
   }
 
   logger.info("agent loop started (pull)", { role, subject, consumer });
+
+  const BACKOFF_MS = 500;
+  const BACKOFF_MAX_MS = 5000;
+  let delayMs = BACKOFF_MS;
 
   while (true) {
     const processed = await bus.consume(
@@ -150,7 +163,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       { timeoutMs: 5000, maxMessages: 10 },
     );
     if (processed === 0) {
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, delayMs));
+      delayMs = Math.min(delayMs * 2, BACKOFF_MAX_MS);
+    } else {
+      delayMs = BACKOFF_MS;
     }
   }
 }

@@ -1,9 +1,8 @@
 import pg from "pg";
+import { getPool } from "./db.js";
 import { appendEvent } from "./contextWal.js";
 import { createSwarmEvent } from "./events.js";
 import { canTransition, type DriftInput, type GovernanceConfig } from "./governance.js";
-
-const { Pool } = pg;
 
 export type Node = "ContextIngested" | "FactsExtracted" | "DriftChecked";
 
@@ -27,17 +26,7 @@ export function nextState(s: GraphState): GraphState {
 
 /* ---- Postgres-backed persistence ---- */
 
-let _pool: pg.Pool | null = null;
 let _tableEnsured = false;
-
-function getPool(): pg.Pool {
-  if (!_pool) {
-    const url = process.env.DATABASE_URL;
-    if (!url) throw new Error("DATABASE_URL is required for state graph");
-    _pool = new Pool({ connectionString: url, max: 5 });
-  }
-  return _pool;
-}
 
 export function _resetStateTableEnsured(): void {
   _tableEnsured = false;
@@ -48,7 +37,7 @@ export async function ensureStateTable(pool?: pg.Pool): Promise<void> {
   const p = pool ?? getPool();
   await p.query(`
     CREATE TABLE IF NOT EXISTS swarm_state (
-      id         TEXT PRIMARY KEY DEFAULT 'singleton',
+      scope_id   TEXT PRIMARY KEY,
       run_id     TEXT NOT NULL,
       last_node  TEXT NOT NULL,
       epoch      BIGINT NOT NULL DEFAULT 0,
@@ -58,11 +47,12 @@ export async function ensureStateTable(pool?: pg.Pool): Promise<void> {
   _tableEnsured = true;
 }
 
-export async function loadState(pool?: pg.Pool): Promise<GraphState | null> {
+export async function loadState(scopeId: string, pool?: pg.Pool): Promise<GraphState | null> {
   const p = pool ?? getPool();
   await ensureStateTable(p);
   const res = await p.query(
-    "SELECT run_id, last_node, epoch, updated_at FROM swarm_state WHERE id = 'singleton'",
+    "SELECT run_id, last_node, epoch, updated_at FROM swarm_state WHERE scope_id = $1",
+    [scopeId],
   );
   if (res.rowCount === 0) return null;
   const row = res.rows[0];
@@ -75,6 +65,7 @@ export async function loadState(pool?: pg.Pool): Promise<GraphState | null> {
 }
 
 export async function initState(
+  scopeId: string,
   runId: string,
   startNode: Node = "ContextIngested",
   pool?: pg.Pool,
@@ -82,14 +73,14 @@ export async function initState(
   const p = pool ?? getPool();
   await ensureStateTable(p);
   const res = await p.query(
-    `INSERT INTO swarm_state (id, run_id, last_node, epoch, updated_at)
-     VALUES ('singleton', $1, $2, 0, now())
-     ON CONFLICT (id) DO NOTHING
+    `INSERT INTO swarm_state (scope_id, run_id, last_node, epoch, updated_at)
+     VALUES ($1, $2, $3, 0, now())
+     ON CONFLICT (scope_id) DO NOTHING
      RETURNING run_id, last_node, epoch, updated_at`,
-    [runId, startNode],
+    [scopeId, runId, startNode],
   );
   if (res.rowCount === 0) {
-    return (await loadState(p))!;
+    return (await loadState(scopeId, p))!;
   }
   const row = res.rows[0];
   return {
@@ -101,6 +92,7 @@ export async function initState(
 }
 
 export interface AdvanceOptions {
+  scopeId?: string;
   drift?: DriftInput;
   governance?: GovernanceConfig;
 }
@@ -124,11 +116,12 @@ export async function advanceState(
     opts = poolOrOpts as AdvanceOptions;
     p = maybePool ?? getPool();
   } else {
-    p = getPool();
+    p = maybePool ?? getPool();
   }
+  const scopeId = opts.scopeId ?? "default";
   await ensureStateTable(p);
 
-  const current = await loadState(p);
+  const current = await loadState(scopeId, p);
   if (!current || current.epoch !== expectedEpoch) return null;
 
   const next = transitions[current.lastNode];
@@ -142,9 +135,9 @@ export async function advanceState(
   const res = await p.query(
     `UPDATE swarm_state
      SET last_node = $1, epoch = $2, updated_at = now()
-     WHERE id = 'singleton' AND epoch = $3
+     WHERE scope_id = $3 AND epoch = $4
      RETURNING run_id, last_node, epoch, updated_at`,
-    [next, newEpoch, expectedEpoch],
+    [next, newEpoch, scopeId, expectedEpoch],
   );
 
   if (res.rowCount === 0) return null;

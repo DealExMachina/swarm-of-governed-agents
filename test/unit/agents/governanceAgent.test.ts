@@ -11,6 +11,41 @@ import {
   type GovernanceAgentEnv,
 } from "../../../src/agents/governanceAgent";
 import type { Proposal } from "../../../src/events";
+import { _setMitlPoolForTest, _clearPendingForTest, getPending } from "../../../src/mitlServer";
+
+function createFakeMitlPool(): import("pg").Pool {
+  const store = new Map<string, { proposal: unknown; action_payload: unknown }>();
+  return {
+    query: vi.fn(async (text: string, values?: unknown[]) => {
+      if (text.includes("CREATE TABLE") || text.includes("CREATE INDEX")) return { rows: [], rowCount: 0 };
+      if (text.includes("INSERT INTO mitl_pending")) {
+        const [id, proposal, action_payload] = values ?? [];
+        store.set(String(id), {
+          proposal: typeof proposal === "string" ? JSON.parse(proposal) : proposal,
+          action_payload: typeof action_payload === "string" ? JSON.parse(action_payload as string) : action_payload,
+        });
+        return { rows: [], rowCount: 1 };
+      }
+      if (text.includes("SELECT proposal_id, proposal FROM mitl_pending")) {
+        const rows = Array.from(store.entries()).map(([proposal_id, v]) => ({ proposal_id, proposal: v.proposal }));
+        return { rows, rowCount: rows.length };
+      }
+      if (text.includes("SELECT proposal, action_payload FROM mitl_pending")) {
+        const id = values?.[0];
+        const row = id ? store.get(String(id)) : null;
+        if (!row) return { rows: [], rowCount: 0 };
+        return { rows: [{ proposal: row.proposal, action_payload: row.action_payload }], rowCount: 1 };
+      }
+      if (text.includes("DELETE FROM mitl_pending")) {
+        const id = values?.[0];
+        if (id) store.delete(String(id));
+        else store.clear();
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }),
+  } as unknown as import("pg").Pool;
+}
 
 const { mockLoadState } = vi.hoisted(() => ({ mockLoadState: vi.fn() }));
 const { mockEvaluateFinality } = vi.hoisted(() => ({ mockEvaluateFinality: vi.fn() }));
@@ -63,7 +98,10 @@ describe("governanceAgent", () => {
   let actionCalls: Array<{ subject: string; data: Record<string, unknown> }>;
   let rejectionCalls: Array<{ subject: string; data: Record<string, unknown> }>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    const fakePool = createFakeMitlPool();
+    _setMitlPoolForTest(fakePool);
+    await _clearPendingForTest(fakePool);
     actionCalls = [];
     rejectionCalls = [];
     publishAction = vi.fn(async (subj, data) => {
@@ -108,8 +146,6 @@ describe("governanceAgent", () => {
   });
 
   it("escalates to pending when canTransition blocks (critical drift, DriftChecked -> ContextIngested)", async () => {
-    const { getPending, _clearPendingForTest } = await import("../../../src/mitlServer");
-    _clearPendingForTest();
     mockLoadState.mockResolvedValue({
       runId: "r1",
       lastNode: "DriftChecked",
@@ -134,7 +170,7 @@ describe("governanceAgent", () => {
 
     await processProposal(proposal, env);
 
-    const pendingList = getPending();
+    const pendingList = await getPending();
     expect(pendingList.some((p) => p.proposal_id === "p2")).toBe(true);
     expect(rejectionCalls).toHaveLength(0);
   });
@@ -170,8 +206,6 @@ describe("governanceAgent", () => {
   });
 
   it("when mode is MITL, adds to pending and publishes to pending_approval (no immediate action)", async () => {
-    const { getPending, _clearPendingForTest } = await import("../../../src/mitlServer");
-    _clearPendingForTest();
     mockLoadState.mockResolvedValue({
       runId: "r1",
       lastNode: "ContextIngested",
@@ -194,7 +228,7 @@ describe("governanceAgent", () => {
       mode: "MITL",
     };
     await processProposal(proposal, env);
-    const pendingList = getPending();
+    const pendingList = await getPending();
     expect(pendingList).toHaveLength(1);
     expect(pendingList[0].proposal_id).toBe("p-mitl");
     expect(actionCalls.some((c) => c.subject.startsWith("swarm.pending_approval"))).toBe(true);
@@ -557,7 +591,10 @@ describe("governanceAgent", () => {
       await runFinalityCheck("my-scope");
       expect(mockEvaluateFinality).toHaveBeenCalledWith("my-scope");
       expect(mockSubmitFinalityReviewForScope).toHaveBeenCalledTimes(1);
-      expect(mockSubmitFinalityReviewForScope).toHaveBeenCalledWith("my-scope");
+      expect(mockSubmitFinalityReviewForScope).toHaveBeenCalledWith("my-scope", expect.objectContaining({
+        kind: "review",
+        request: expect.objectContaining({ scope_id: "my-scope", goal_score: 0.8 }),
+      }));
     });
 
     it("does not call submitFinalityReviewForScope when evaluateFinality returns status", async () => {

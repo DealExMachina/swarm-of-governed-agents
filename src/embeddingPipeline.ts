@@ -1,20 +1,8 @@
 import pg from "pg";
+import { getPool } from "./db.js";
 import { getOllamaBaseUrl, getEmbeddingModel } from "./modelConfig.js";
 
-const { Pool } = pg;
-
 const EMBEDDING_DIM = 1024;
-
-let _pool: pg.Pool | null = null;
-
-function getPool(): pg.Pool {
-  if (!_pool) {
-    const url = process.env.DATABASE_URL;
-    if (!url) throw new Error("DATABASE_URL is required for embedding pipeline");
-    _pool = new Pool({ connectionString: url, max: 3 });
-  }
-  return _pool;
-}
 
 /**
  * Call Ollama bge-m3 (or EMBEDDING_MODEL) to embed text. Returns 1024-dim vector.

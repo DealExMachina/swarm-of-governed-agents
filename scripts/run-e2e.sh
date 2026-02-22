@@ -3,6 +3,8 @@
 set -e
 cd "$(dirname "$0")/.."
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
+# Prefer pnpm when lockfile is pnpm (repo is pnpm-managed)
+if command -v pnpm >/dev/null 2>&1 && [ -f pnpm-lock.yaml ]; then RUNNER=pnpm; else RUNNER=npm; fi
 
 # Facts-worker in Docker: use OpenAI from .env when available, else local Ollama on host
 # - OPENAI_API_KEY set: worker uses OpenAI (no host Ollama needed)
@@ -62,12 +64,12 @@ mkdir -p "$LOG_DIR"
 : > "$LOG_DIR/swarm-status.log"
 : > "$LOG_DIR/swarm-governance.log"
 : > "$LOG_DIR/swarm-executor.log"
-( export AGENT_ROLE=facts AGENT_ID=facts-1; npm run swarm >> "$LOG_DIR/swarm-facts.log" 2>&1 ) &
-( export AGENT_ROLE=drift AGENT_ID=drift-1; npm run swarm >> "$LOG_DIR/swarm-drift.log" 2>&1 ) &
-( export AGENT_ROLE=planner AGENT_ID=planner-1; npm run swarm >> "$LOG_DIR/swarm-planner.log" 2>&1 ) &
-( export AGENT_ROLE=status AGENT_ID=status-1; npm run swarm >> "$LOG_DIR/swarm-status.log" 2>&1 ) &
-( export AGENT_ROLE=governance AGENT_ID=governance-1; npm run swarm >> "$LOG_DIR/swarm-governance.log" 2>&1 ) &
-( export AGENT_ROLE=executor; npm run swarm >> "$LOG_DIR/swarm-executor.log" 2>&1 ) &
+( export AGENT_ROLE=facts AGENT_ID=facts-1; $RUNNER run swarm >> "$LOG_DIR/swarm-facts.log" 2>&1 ) &
+( export AGENT_ROLE=drift AGENT_ID=drift-1; $RUNNER run swarm >> "$LOG_DIR/swarm-drift.log" 2>&1 ) &
+( export AGENT_ROLE=planner AGENT_ID=planner-1; $RUNNER run swarm >> "$LOG_DIR/swarm-planner.log" 2>&1 ) &
+( export AGENT_ROLE=status AGENT_ID=status-1; $RUNNER run swarm >> "$LOG_DIR/swarm-status.log" 2>&1 ) &
+( export AGENT_ROLE=governance AGENT_ID=governance-1; $RUNNER run swarm >> "$LOG_DIR/swarm-governance.log" 2>&1 ) &
+( export AGENT_ROLE=executor; $RUNNER run swarm >> "$LOG_DIR/swarm-executor.log" 2>&1 ) &
 echo "[E2E] Swarm started. Waiting 50s for pipeline..."
 sleep 50
 

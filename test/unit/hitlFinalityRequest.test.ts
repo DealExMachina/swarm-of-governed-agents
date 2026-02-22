@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { getPending, _clearPendingForTest } from "../../src/mitlServer";
+import { getPending, _clearPendingForTest, _setMitlPoolForTest } from "../../src/mitlServer";
 import { submitFinalityReviewForScope } from "../../src/hitlFinalityRequest";
 
 vi.mock("../../src/finalityEvaluator.js", () => ({
@@ -8,9 +8,45 @@ vi.mock("../../src/finalityEvaluator.js", () => ({
 
 import { evaluateFinality } from "../../src/finalityEvaluator.js";
 
+function createFakeMitlPool(): import("pg").Pool {
+  const store = new Map<string, { proposal: unknown; action_payload: unknown }>();
+  return {
+    query: vi.fn(async (text: string, values?: unknown[]) => {
+      if (text.includes("CREATE TABLE") || text.includes("CREATE INDEX")) return { rows: [], rowCount: 0 };
+      if (text.includes("INSERT INTO mitl_pending")) {
+        const [id, proposal, action_payload] = values ?? [];
+        store.set(String(id), {
+          proposal: typeof proposal === "string" ? JSON.parse(proposal) : proposal,
+          action_payload: typeof action_payload === "string" ? JSON.parse(action_payload as string) : action_payload,
+        });
+        return { rows: [], rowCount: 1 };
+      }
+      if (text.includes("SELECT proposal_id, proposal FROM mitl_pending")) {
+        const rows = Array.from(store.entries()).map(([proposal_id, v]) => ({ proposal_id, proposal: v.proposal }));
+        return { rows, rowCount: rows.length };
+      }
+      if (text.includes("SELECT proposal, action_payload FROM mitl_pending")) {
+        const id = values?.[0];
+        const row = id ? store.get(String(id)) : null;
+        if (!row) return { rows: [], rowCount: 0 };
+        return { rows: [{ proposal: row.proposal, action_payload: row.action_payload }], rowCount: 1 };
+      }
+      if (text.includes("DELETE FROM mitl_pending")) {
+        const id = values?.[0];
+        if (id) store.delete(String(id));
+        else store.clear();
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }),
+  } as unknown as import("pg").Pool;
+}
+
 describe("hitlFinalityRequest", () => {
-  beforeEach(() => {
-    _clearPendingForTest();
+  beforeEach(async () => {
+    const fakePool = createFakeMitlPool();
+    _setMitlPoolForTest(fakePool);
+    await _clearPendingForTest(fakePool);
     vi.stubEnv("OLLAMA_BASE_URL", "");
     vi.mocked(evaluateFinality).mockReset();
   });
@@ -23,14 +59,14 @@ describe("hitlFinalityRequest", () => {
     vi.mocked(evaluateFinality).mockResolvedValue(null);
     const out = await submitFinalityReviewForScope("scope-1");
     expect(out).toBe(false);
-    expect(getPending()).toHaveLength(0);
+    expect(await getPending()).toHaveLength(0);
   });
 
   it("submitFinalityReviewForScope returns false when evaluateFinality returns status", async () => {
     vi.mocked(evaluateFinality).mockResolvedValue({ kind: "status", status: "RESOLVED" });
     const out = await submitFinalityReviewForScope("scope-1");
     expect(out).toBe(false);
-    expect(getPending()).toHaveLength(0);
+    expect(await getPending()).toHaveLength(0);
   });
 
   it("submitFinalityReviewForScope adds pending and returns true when evaluateFinality returns review", async () => {
@@ -52,7 +88,7 @@ describe("hitlFinalityRequest", () => {
     });
     const out = await submitFinalityReviewForScope("scope-1");
     expect(out).toBe(true);
-    const pending = getPending();
+    const pending = await getPending();
     expect(pending).toHaveLength(1);
     expect(pending[0].proposal.agent).toBe("finality-evaluator");
     expect(pending[0].proposal.proposed_action).toBe("finality_review");

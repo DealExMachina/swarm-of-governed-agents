@@ -1,6 +1,5 @@
 import pg from "pg";
-
-const { Pool } = pg;
+import { getPool } from "./db.js";
 
 export interface ContextEvent {
   seq: number;
@@ -8,17 +7,7 @@ export interface ContextEvent {
   data: Record<string, unknown>;
 }
 
-let _pool: pg.Pool | null = null;
 let _tableEnsured = false;
-
-function getPool(): pg.Pool {
-  if (!_pool) {
-    const url = process.env.DATABASE_URL;
-    if (!url) throw new Error("DATABASE_URL is required for context WAL");
-    _pool = new Pool({ connectionString: url, max: 5 });
-  }
-  return _pool;
-}
 
 export function _resetTableEnsured(): void {
   _tableEnsured = false;

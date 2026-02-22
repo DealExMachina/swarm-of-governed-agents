@@ -20,10 +20,16 @@ export interface TransitionRule {
 
 export type ApprovalMode = "YOLO" | "MITL" | "MASTER";
 
+export interface ScopeOverrides {
+  mode?: ApprovalMode;
+}
+
 export interface GovernanceConfig {
   mode?: ApprovalMode;
   rules: PolicyRule[];
   transition_rules?: TransitionRule[];
+  /** Per-scope overrides; only mode is overridable per scope. */
+  scopes?: Record<string, ScopeOverrides>;
 }
 
 export interface DriftInput {
@@ -43,6 +49,19 @@ export function loadPolicies(path: string): GovernanceConfig {
     return { rules: [], transition_rules: parsed.transition_rules ?? [] };
   }
   return parsed;
+}
+
+/**
+ * Return the effective governance config for a scope (merge scope overrides onto base).
+ * If the scope has an entry in config.scopes, its mode overrides the top-level mode.
+ */
+export function getGovernanceForScope(scopeId: string, config: GovernanceConfig): GovernanceConfig {
+  const overrides = config.scopes?.[scopeId];
+  if (!overrides) return config;
+  return {
+    ...config,
+    mode: overrides.mode ?? config.mode,
+  };
 }
 
 export function evaluateRules(drift: DriftInput, config: GovernanceConfig): string[] {

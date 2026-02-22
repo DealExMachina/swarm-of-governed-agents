@@ -1,18 +1,6 @@
 import pg from "pg";
 import type { FinalitySnapshot } from "./finalityEvaluator.js";
-
-const { Pool } = pg;
-
-let _pool: pg.Pool | null = null;
-
-function getPool(): pg.Pool {
-  if (!_pool) {
-    const url = process.env.DATABASE_URL;
-    if (!url) throw new Error("DATABASE_URL is required for semantic graph");
-    _pool = new Pool({ connectionString: url, max: 5 });
-  }
-  return _pool;
-}
+import { getPool } from "./db.js";
 
 export interface SemanticNode {
   node_id: string;
@@ -253,6 +241,20 @@ export async function loadFinalitySnapshot(scopeId: string): Promise<FinalitySna
   );
   const row = nodeRes.rows[0] ?? {};
 
+  const claimsCount = Number(row.claims_active_count ?? 0);
+  if (claimsCount === 0) {
+    return {
+      claims_active_min_confidence: 0,
+      claims_active_count: 0,
+      claims_active_avg_confidence: 0,
+      contradictions_unresolved_count: 0,
+      contradictions_total_count: 0,
+      risks_critical_active_count: 0,
+      goals_completion_ratio: 0,
+      scope_risk_score: 0,
+    };
+  }
+
   const goalRes = await p.query(
     `SELECT
        COUNT(*) FILTER (WHERE type = 'goal' AND status = 'resolved')::int AS resolved,
@@ -321,6 +323,88 @@ export async function appendResolutionGoal(
     },
     client,
   );
+}
+
+/** Update a node's confidence (monotonic upsert: only if new confidence >= existing). */
+export async function updateNodeConfidence(
+  nodeId: string,
+  confidence: number,
+  client?: pg.PoolClient,
+): Promise<void> {
+  const q: Queryable = client ?? getPool();
+  await q.query(
+    `UPDATE nodes SET confidence = $2, updated_at = now(), version = version + 1
+     WHERE node_id = $1 AND confidence <= $2`,
+    [nodeId, confidence],
+  );
+}
+
+/** Update a node's status. */
+export async function updateNodeStatus(
+  nodeId: string,
+  status: string,
+  client?: pg.PoolClient,
+): Promise<void> {
+  const q: Queryable = client ?? getPool();
+  await q.query(
+    `UPDATE nodes SET status = $2, updated_at = now(), version = version + 1
+     WHERE node_id = $1`,
+    [nodeId, status],
+  );
+}
+
+/** Check if a resolving edge exists for either side of a contradiction pair. */
+export async function hasResolvingEdge(
+  scopeId: string,
+  sourceId: string,
+  targetId: string,
+  client?: pg.PoolClient,
+): Promise<boolean> {
+  const q: Queryable = client ?? getPool();
+  const res = await q.query(
+    `SELECT 1 FROM edges
+     WHERE scope_id = $1 AND edge_type = 'resolves'
+     AND (target_id = $2 OR target_id = $3)
+     LIMIT 1`,
+    [scopeId, sourceId, targetId],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+/** Query nodes by creator, optionally filtered by type. Returns all matching nodes. */
+export async function queryNodesByCreator(
+  scopeId: string,
+  createdBy: string,
+  type?: string,
+  client?: pg.PoolClient,
+): Promise<SemanticNode[]> {
+  const q: Queryable = client ?? getPool();
+  const conditions = ["scope_id = $1", "created_by = $2"];
+  const params: unknown[] = [scopeId, createdBy];
+  if (type) {
+    conditions.push("type = $3");
+    params.push(type);
+  }
+  const res = await q.query(
+    `SELECT node_id, scope_id, type, content, confidence, status, source_ref, metadata, created_at, updated_at, created_by, version
+     FROM nodes WHERE ${conditions.join(" AND ")}
+     ORDER BY created_at ASC`,
+    params,
+  );
+  return res.rows.map((r) => ({
+    node_id: r.node_id,
+    scope_id: r.scope_id,
+    type: r.type,
+    content: r.content,
+    confidence: Number(r.confidence),
+    status: r.status,
+    source_ref: (r.source_ref as Record<string, unknown>) ?? {},
+    metadata: (r.metadata as Record<string, unknown>) ?? {},
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    created_by: r.created_by,
+    version: Number(r.version),
+  }));
 }
 
 /** Lightweight counts by type for feed / state graph display. */
