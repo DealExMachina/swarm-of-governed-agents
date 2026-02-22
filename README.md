@@ -53,6 +53,14 @@ The architecture rests on three principles:
 
 **3. Declarative rules, not imperative code.** `governance.yaml` expresses transition rules and remediation actions. Rules are evaluated at runtime, not compiled into graph edges. Adding a new constraint is a YAML change, not a refactor.
 
+```mermaid
+stateDiagram-v2
+  direction LR
+  ContextIngested --> FactsExtracted: facts
+  FactsExtracted --> DriftChecked: drift
+  DriftChecked --> ContextIngested: planner/status, governance
+```
+
 The result: agents are **reasoning roles**, not pipeline stages. The coordination emerges from the shared context and the governance layer — not from wiring. See [docs/architecture.md](docs/architecture.md) for the full technical deep dive.
 
 ---

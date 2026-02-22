@@ -22,44 +22,38 @@ Back to [README.md](../README.md).
 
 ## 1. Overview
 
-```
-                 ┌──────────────────────────────────────────────┐
-                 │              NATS JetStream                  │
-                 │  swarm.jobs.>  swarm.proposals.>             │
-                 │  swarm.actions.>  swarm.events.>             │
-                 └──────┬────────────┬───────────┬──────────────┘
-                        │            │           │
-            ┌───────────┴──┐   ┌─────┴────┐  ┌──┴──────────┐
-            │  Facts Agent │   │  Drift   │  │  Planner    │
-            │  (extract)   │   │  Agent   │  │  Agent      │
-            └──────┬───────┘   └──┬───────┘  └──┬──────────┘
-                   │              │              │
-                   ▼              ▼              ▼
-          ┌────────────────────────────────────────────┐
-          │            Shared State                     │
-          │  ┌─────────────┐  ┌──────────────────────┐ │
-          │  │ Postgres WAL│  │ S3 (facts/drift)     │ │
-          │  │ (context_   │  │                      │ │
-          │  │  events)    │  │                      │ │
-          │  └─────────────┘  └──────────────────────┘ │
-          │  ┌─────────────────────────────────────┐   │
-          │  │ Semantic Graph (nodes + edges)       │   │
-          │  │ Postgres + pgvector                  │   │
-          │  └─────────────────────────────────────┘   │
-          └────────────────────┬───────────────────────┘
-                               │
-                    ┌──────────┴──────────┐
-                    │  Governance Agent   │
-                    │  (approve/reject/   │
-                    │   escalate)         │
-                    └──────────┬──────────┘
-                               │
-                    ┌──────────┴──────────┐
-                    │  Finality Evaluator │
-                    │  (V(t), pressure,   │
-                    │   monotonicity,     │
-                    │   HITL review)      │
-                    └─────────────────────┘
+```mermaid
+flowchart TB
+  subgraph NATS["NATS JetStream"]
+    J[swarm.jobs.>]
+    P[swarm.proposals.>]
+    A[swarm.actions.>]
+    E[swarm.events.>]
+  end
+
+  subgraph Agents["Reasoning agents"]
+    FA[Facts Agent]
+    DA[Drift Agent]
+    PA[Planner Agent]
+    SA[Status Agent]
+  end
+
+  subgraph Shared["Shared state"]
+    WAL[Postgres WAL\ncontext_events]
+    S3[S3\nfacts / drift / history]
+    SG[Semantic graph\nnodes + edges\nPostgres + pgvector]
+  end
+
+  subgraph Control["Control loop"]
+    GOV[Governance Agent\napprove / reject / escalate]
+    FIN[Finality Evaluator\nV(t), monotonicity,\nplateau, HITL]
+  end
+
+  NATS --> FA & DA & PA & SA
+  FA & DA & PA & SA --> WAL & S3 & SG
+  WAL & S3 & SG --> GOV
+  GOV --> FIN
+  FIN -.->|review_requested| NATS
 ```
 
 The system has no fixed pipeline. Four reasoning agents (facts, drift, planner,
@@ -120,10 +114,12 @@ is drained (all pending messages flushed) before disconnect.
 
 ### Three-node cycle
 
-```
-ContextIngested  ──>  FactsExtracted  ──>  DriftChecked
-       ^                                        │
-       └────────────────────────────────────────┘
+```mermaid
+stateDiagram-v2
+  [*] --> ContextIngested
+  ContextIngested --> FactsExtracted: facts agent
+  FactsExtracted --> DriftChecked: drift agent
+  DriftChecked --> ContextIngested: planner/status, governance
 ```
 
 The state machine has exactly three nodes forming a cycle. Each transition
@@ -404,31 +400,26 @@ The mode is set globally in `governance.yaml` and can be overridden per scope.
 
 ### Decision pipeline
 
+```mermaid
+flowchart TD
+  A[Proposal arrives] --> B[evaluateProposalDeterministic]
+  B --> C{Quick checks}
+  C -->|ignore / reject / pending| OUT[IGNORE / REJECT / PENDING]
+  C -->|pass| D{mode?}
+  D -->|MASTER| APPROVE[APPROVE master_override]
+  D -->|MITL| PEND[PENDING]
+  D -->|YOLO| E{LLM configured?}
+  E -->|no| COMMIT[commitDeterministicResult]
+  E -->|yes| OV[runOversightAgent]
+  OV --> O1[acceptDeterministic]
+  OV --> O2[escalateToLLM]
+  OV --> O3[escalateToHuman]
+  O1 --> COMMIT
+  O2 --> AGENT[processProposalWithAgent]
+  O3 --> PEND
 ```
-  Proposal arrives
-       │
-       ▼
-  evaluateProposalDeterministic()
-       │
-       ├── proposed_action != advance_state? ──> IGNORE
-       ├── epoch mismatch?                  ──> REJECT
-       ├── mode == MASTER?                  ──> APPROVE (master_override)
-       ├── canTransition(from, to, drift)?  ──> blocked? PENDING (MITL)
-       ├── checkPermission(agent, writer)?  ──> denied?  REJECT
-       ├── mode == MITL?                    ──> PENDING
-       └── otherwise                        ──> APPROVE
-       │
-       ▼
-  Mode == YOLO and LLM configured?
-       │
-       ├── YES ──> runOversightAgent()
-       │              │
-       │              ├── acceptDeterministic  ──> commit result as-is
-       │              ├── escalateToLLM        ──> processProposalWithAgent()
-       │              └── escalateToHuman      ──> pend for MITL
-       │
-       └── NO  ──> commitDeterministicResult()
-```
+
+Quick checks (in order): proposed_action != advance_state → IGNORE; epoch mismatch → REJECT; canTransition blocked → PENDING; checkPermission denied → REJECT.
 
 ### Oversight agent
 
@@ -721,16 +712,25 @@ resilience in environments where migrations have not been applied.
 
 ## Summary of table relationships
 
-```
-context_events                    (standalone WAL)
-swarm_state                       (standalone, per-scope state machine)
-nodes ──────────┐
-    │           │── edges         (FK: source_id, target_id -> nodes ON DELETE CASCADE)
-    │           │
-    └── convergence_history       (logical: snapshot computed from nodes/edges)
-scope_finality_decisions          (standalone, per-scope audit)
-mitl_pending                      (standalone, per-proposal queue)
-processed_messages                (standalone, consumer dedup)
-filter_configs                    (standalone, per-agent config)
-agent_memory                      (standalone, per-agent state)
+```mermaid
+flowchart LR
+  subgraph standalone["Standalone"]
+    CE[context_events]
+    SS[swarm_state]
+    SFD[scope_finality_decisions]
+    MP[mitl_pending]
+    PM[processed_messages]
+    FC[filter_configs]
+    AM[agent_memory]
+  end
+
+  subgraph graph["Semantic graph"]
+    N[nodes]
+    E[edges]
+  end
+
+  CH[convergence_history]
+
+  N -->|source_id, target_id| E
+  N -.->|logical: snapshot from nodes/edges| CH
 ```

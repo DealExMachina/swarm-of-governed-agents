@@ -27,6 +27,15 @@ This is the front door. For the full step-by-step walkthrough with commands, exp
 
 ## Quick start
 
+```mermaid
+flowchart TD
+  A[Docker: postgres, s3, nats, facts-worker] --> B[pnpm ensure-bucket, ensure-schema, ensure-stream]
+  B --> C[swarm:all]
+  C --> D[feed]
+  D --> E[demo server]
+  E --> F[Open :3003]
+```
+
 ```bash
 # 1. Infrastructure
 docker compose up -d postgres s3 nats facts-worker
@@ -51,6 +60,16 @@ Open [http://localhost:3003](http://localhost:3003) to begin the walkthrough.
 ---
 
 ## The 5 documents
+
+```mermaid
+flowchart LR
+  D1[Doc 1\nAnalyst Briefing] --> D2[Doc 2\nFinancial DD]
+  D2 --> D3[Doc 3\nTechnical]
+  D3 --> D4[Doc 4\nMarket Intel]
+  D4 --> D5[Doc 5\nLegal Review]
+  D2 -.->|high drift: block| BLOCK[Governance blocks]
+  D5 -.->|near-finality| HITL[HITL review queued]
+```
 
 | # | Document | Key event |
 |---|---|---|

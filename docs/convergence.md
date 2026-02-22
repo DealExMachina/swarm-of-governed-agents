@@ -36,6 +36,24 @@ The convergence tracker (`src/convergenceTracker.ts`) transforms finality from a
 
 ## 2. Five mechanisms
 
+```mermaid
+flowchart LR
+  subgraph inputs["Inputs"]
+    S[Snapshot]
+    H[History]
+  end
+  subgraph mech["Mechanisms"]
+    V[V(t) Lyapunov]
+    ALPHA[Convergence rate alpha]
+    MONO[Monotonicity gate]
+    PLAT[Plateau detection]
+    PRESS[Pressure-directed]
+  end
+  S --> V & ALPHA & PRESS
+  H --> ALPHA & MONO & PLAT
+  V --> ALPHA
+```
+
 ### 2.1 Lyapunov disagreement function V(t)
 
 **Definition.** A scalar non-negative function that measures the aggregate weighted distance of all finality dimensions from their targets. V = 0 means perfect finality; V > 0 means at least one dimension is below target.
@@ -177,6 +195,15 @@ The `evaluateFinality(scopeId)` function in `src/finalityEvaluator.ts` runs as a
 
 ### 3.1 Workflow steps
 
+```mermaid
+flowchart LR
+  S1[1. Prior human decision?] --> S2[2. Load snapshot]
+  S2 --> S3[3. Compute V, pressure; record point]
+  S3 --> S4[4. Load history; analyze rate, monotonicity, plateau]
+  S4 --> S5[5. Evaluate conditions & score]
+  S5 --> S6[6. Route: RESOLVED / ESCALATED / HITL / ACTIVE]
+```
+
 | Step | Action | Source |
 |------|--------|--------|
 | 1 | Check for prior human-approved finality decision | `finalityDecisions.ts` |
@@ -188,7 +215,25 @@ The `evaluateFinality(scopeId)` function in `src/finalityEvaluator.ts` runs as a
 
 If the convergence tracker is unavailable (e.g., the `convergence_history` table does not exist), the evaluator degrades gracefully: the monotonicity gate defaults to true (permissive) and convergence data is omitted from the HITL review payload.
 
-### 3.2 Decision path table
+### 3.2 Decision path
+
+```mermaid
+flowchart TD
+  A[evaluateFinality] --> B{Prior approve_finality?}
+  B -->|yes| R1[RESOLVED]
+  B -->|no| C{All conditions + score >= 0.92 + monotonic?}
+  C -->|yes| R1
+  C -->|no| D{alpha < -0.05?}
+  D -->|yes| E1[ESCALATED]
+  D -->|no| F{Score in 0.40..0.92?}
+  F -->|yes| G{Plateau?}
+  G --> HITL[HITL review]
+  F -->|no| I{ESCALATED / BLOCKED / EXPIRED conditions?}
+  I -->|yes| E1
+  I -->|no| ACT[ACTIVE]
+```
+
+### 3.3 Decision path table
 
 | Condition | Convergence state | Outcome |
 |-----------|-------------------|---------|
@@ -203,7 +248,7 @@ If the convergence tracker is unavailable (e.g., the `convergence_history` table
 | EXPIRED conditions met (inactive >= 30 days) | Any | EXPIRED |
 | None of the above | Any | ACTIVE (keep iterating) |
 
-### 3.3 HITL review payload
+### 3.4 HITL review payload
 
 When the score is in the near-finality range, a `FinalityReviewRequest` is constructed with:
 - Goal score, threshold values, and gap

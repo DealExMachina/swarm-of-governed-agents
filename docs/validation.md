@@ -11,6 +11,22 @@ and where assumptions begin.
 
 ## 1. What is tested vs what is theoretical
 
+```mermaid
+flowchart TB
+  subgraph tested["Tested / validated"]
+    U[Unit tests\nVitest, 196+]
+    BENCH[Convergence benchmark\n7 scenarios, pure math]
+    E2E[E2E pipeline\nrun-e2e.sh, manual]
+  end
+  subgraph theoretical["Theoretical / assumed"]
+    T1[Concurrent CAS contention]
+    T2[Real LLM trajectory patterns]
+    T3[Multi-scope, chaos, stress]
+  end
+  U --> BENCH
+  BENCH --> E2E
+```
+
 | Aspect | Tested / Validated | Theoretical / Assumed |
 |--------|-------------------|-----------------------|
 | State graph transitions (CAS, cycle) | Unit tests with mocked Postgres | Linearizability under concurrent writers (single-row CAS, no multi-node contention test) |
