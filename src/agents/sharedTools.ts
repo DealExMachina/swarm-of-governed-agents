@@ -3,7 +3,7 @@ import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { s3GetText, s3ListKeys } from "../s3.js";
 import { tailEvents } from "../contextWal.js";
-import { loadPolicies } from "../governance.js";
+import { loadPolicies, getGovernanceForScope } from "../governance.js";
 import { join } from "path";
 
 const KEY_FACTS = "facts/latest.json";
@@ -96,7 +96,8 @@ export function makeReadGovernanceRulesTool() {
       transition_rules: z.array(z.record(z.unknown())),
     }),
     execute: async () => {
-      const config = loadPolicies(GOVERNANCE_PATH);
+      const scopeId = process.env.SCOPE_ID ?? "default";
+      const config = getGovernanceForScope(scopeId, loadPolicies(GOVERNANCE_PATH));
       return {
         rules: (config.rules ?? []) as unknown as Record<string, unknown>[],
         transition_rules: (config.transition_rules ?? []) as unknown as Record<string, unknown>[],

@@ -1,6 +1,6 @@
 # Seed documents for the swarm context WAL
 
-These files are loaded in filename order by `npm run seed:all` to give the facts agent realistic business context.
+These files are loaded in filename order by `pnpm run seed:all` to give the facts agent realistic business context.
 
 | File | Content |
 |------|---------|

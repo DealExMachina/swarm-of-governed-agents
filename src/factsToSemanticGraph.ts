@@ -2,15 +2,23 @@
  * Sync extracted facts (claims, goals, risks, contradictions) into the semantic graph
  * so loadFinalitySnapshot and finality evaluation have real data.
  *
- * Uses replace strategy per scope: delete existing fact-sourced nodes (and their edges),
- * then insert nodes for claims, goals, risks, and edges for contradictions.
+ * Uses CRDT-inspired monotonic upsert strategy (CodeCRDT, arXiv:2510.18893):
+ * - Claims: upsert-if-better (only update confidence when new >= existing)
+ * - Contradictions: irreversible resolution (once a resolves edge exists, cannot re-open)
+ * - Stale nodes: marked "irrelevant" instead of deleted (append-only semantics)
+ *
+ * This guarantees the goal score is a ratchet — it only moves forward, never regresses.
  */
 
 import {
   runInTransaction,
-  deleteNodesBySource,
   appendNode,
   appendEdge,
+  updateNodeConfidence,
+  updateNodeStatus,
+  hasResolvingEdge,
+  queryNodesByCreator,
+  type SemanticNode,
 } from "./semanticGraph.js";
 import { logger } from "./logger.js";
 
@@ -48,7 +56,7 @@ function parseNliContradiction(s: string): [string, string] | null {
 /**
  * Find best-matching claim node id from content->nodeId map (exact or starts-with).
  */
-function findClaimNodeId(
+export function findClaimNodeId(
   contentToId: Map<string, string>,
   fragment: string,
 ): string | null {
@@ -63,14 +71,41 @@ function findClaimNodeId(
 }
 
 /**
- * Sync facts for a scope into the semantic graph. Replaces any existing fact-sourced
- * nodes for this scope, then inserts claims, goals, risks, and contradiction edges.
+ * Match a new claim against existing nodes by content similarity.
+ * Returns the matched node or null.
+ */
+function matchExistingNode(
+  existingNodes: SemanticNode[],
+  content: string,
+): SemanticNode | null {
+  const trimmed = content.trim();
+  for (const node of existingNodes) {
+    if (
+      node.content === trimmed ||
+      node.content.startsWith(trimmed) ||
+      trimmed.startsWith(node.content)
+    ) {
+      return node;
+    }
+  }
+  return null;
+}
+
+/**
+ * Sync facts for a scope into the semantic graph using monotonic upserts.
+ *
+ * Strategy (CRDT-inspired):
+ * 1. Load existing fact-sourced nodes
+ * 2. For each new claim: upsert-if-better (only increase confidence)
+ * 3. For goals/risks: upsert or insert
+ * 4. For contradictions: only create if no resolving edge exists (irreversible resolution)
+ * 5. Mark stale nodes as "irrelevant" instead of deleting
  */
 export async function syncFactsToSemanticGraph(
   scopeId: string,
   facts: FactsPayload,
   opts?: { embedClaims?: boolean },
-): Promise<{ nodesCreated: number; edgesCreated: number }> {
+): Promise<{ nodesCreated: number; edgesCreated: number; nodesUpdated: number; nodesStaled: number }> {
   const claims = (Array.isArray(facts.claims) ? facts.claims : []).filter((c): c is string => typeof c === "string");
   const goals = (Array.isArray(facts.goals) ? facts.goals : []).filter((g): g is string => typeof g === "string");
   const risks = (Array.isArray(facts.risks) ? facts.risks : []).filter((r): r is string => typeof r === "string");
@@ -80,68 +115,135 @@ export async function syncFactsToSemanticGraph(
   const confidence = typeof facts.confidence === "number" ? facts.confidence : 1;
 
   let nodesCreated = 0;
+  let nodesUpdated = 0;
+  let nodesStaled = 0;
   let edgesCreated = 0;
   const claimContentToNodeId = new Map<string, string>();
 
   await runInTransaction(async (client) => {
-    const deleted = await deleteNodesBySource(scopeId, FACTS_SYNC_SOURCE, client);
-    if (deleted > 0) {
-      logger.info("facts-sync: cleared previous fact nodes", { scopeId, deleted });
-    }
+    // Load existing fact-synced nodes
+    const existingClaims = await queryNodesByCreator(scopeId, FACTS_SYNC_SOURCE, "claim", client);
+    const existingGoals = await queryNodesByCreator(scopeId, FACTS_SYNC_SOURCE, "goal", client);
+    const existingRisks = await queryNodesByCreator(scopeId, FACTS_SYNC_SOURCE, "risk", client);
 
-    claimContentToNodeId.clear();
+    // Track which existing nodes were matched (for stale detection)
+    const matchedClaimIds = new Set<string>();
+    const matchedGoalIds = new Set<string>();
+    const matchedRiskIds = new Set<string>();
 
+    // --- Claims: upsert-if-better ---
     for (const content of claims) {
       if (typeof content !== "string" || !content.trim()) continue;
-      const nodeId = await appendNode(
-        {
-          scope_id: scopeId,
-          type: "claim",
-          content: content.trim(),
-          confidence,
-          status: "active",
-          source_ref: { source: "facts" },
-          created_by: FACTS_SYNC_SOURCE,
-        },
-        client,
-      );
-      claimContentToNodeId.set(content.trim(), nodeId);
-      nodesCreated++;
+      const trimmed = content.trim();
+      const existing = matchExistingNode(existingClaims, trimmed);
+
+      if (existing) {
+        matchedClaimIds.add(existing.node_id);
+        // Monotonic: only update if new confidence >= existing
+        if (confidence >= existing.confidence) {
+          await updateNodeConfidence(existing.node_id, confidence, client);
+          nodesUpdated++;
+        }
+        // Ensure active status (may have been previously marked irrelevant)
+        if (existing.status !== "active") {
+          await updateNodeStatus(existing.node_id, "active", client);
+        }
+        claimContentToNodeId.set(trimmed, existing.node_id);
+      } else {
+        // New claim — insert
+        const nodeId = await appendNode(
+          {
+            scope_id: scopeId,
+            type: "claim",
+            content: trimmed,
+            confidence,
+            status: "active",
+            source_ref: { source: "facts" },
+            created_by: FACTS_SYNC_SOURCE,
+          },
+          client,
+        );
+        claimContentToNodeId.set(trimmed, nodeId);
+        nodesCreated++;
+      }
     }
 
+    // --- Goals: upsert by content match ---
     for (const content of goals) {
       if (typeof content !== "string" || !content.trim()) continue;
-      await appendNode(
-        {
-          scope_id: scopeId,
-          type: "goal",
-          content: content.trim(),
-          status: "active",
-          source_ref: { source: "facts" },
-          created_by: FACTS_SYNC_SOURCE,
-        },
-        client,
-      );
-      nodesCreated++;
+      const trimmed = content.trim();
+      const existing = matchExistingNode(existingGoals, trimmed);
+
+      if (existing) {
+        matchedGoalIds.add(existing.node_id);
+        if (existing.status !== "active") {
+          await updateNodeStatus(existing.node_id, "active", client);
+        }
+      } else {
+        await appendNode(
+          {
+            scope_id: scopeId,
+            type: "goal",
+            content: trimmed,
+            status: "active",
+            source_ref: { source: "facts" },
+            created_by: FACTS_SYNC_SOURCE,
+          },
+          client,
+        );
+        nodesCreated++;
+      }
     }
 
+    // --- Risks: upsert by content match ---
     for (const content of risks) {
       if (typeof content !== "string" || !content.trim()) continue;
-      await appendNode(
-        {
-          scope_id: scopeId,
-          type: "risk",
-          content: content.trim(),
-          status: "active",
-          metadata: { severity: "high" },
-          source_ref: { source: "facts" },
-          created_by: FACTS_SYNC_SOURCE,
-        },
-        client,
-      );
-      nodesCreated++;
+      const trimmed = content.trim();
+      const existing = matchExistingNode(existingRisks, trimmed);
+
+      if (existing) {
+        matchedRiskIds.add(existing.node_id);
+        if (existing.status !== "active") {
+          await updateNodeStatus(existing.node_id, "active", client);
+        }
+      } else {
+        await appendNode(
+          {
+            scope_id: scopeId,
+            type: "risk",
+            content: trimmed,
+            status: "active",
+            metadata: { severity: "high" },
+            source_ref: { source: "facts" },
+            created_by: FACTS_SYNC_SOURCE,
+          },
+          client,
+        );
+        nodesCreated++;
+      }
     }
 
+    // --- Mark stale nodes as "irrelevant" (not deleted — CRDT append-only) ---
+    for (const node of existingClaims) {
+      if (!matchedClaimIds.has(node.node_id) && node.status === "active") {
+        await updateNodeStatus(node.node_id, "irrelevant", client);
+        nodesStaled++;
+      }
+    }
+    for (const node of existingGoals) {
+      if (!matchedGoalIds.has(node.node_id) && node.status === "active") {
+        await updateNodeStatus(node.node_id, "irrelevant", client);
+        nodesStaled++;
+      }
+    }
+    for (const node of existingRisks) {
+      if (!matchedRiskIds.has(node.node_id) && node.status === "active") {
+        await updateNodeStatus(node.node_id, "irrelevant", client);
+        nodesStaled++;
+      }
+    }
+
+    // --- Contradictions: only create if no resolving edge exists (irreversible resolution) ---
     for (const raw of contradictions) {
       const str = typeof raw === "string" ? raw : String(raw);
       const pair = parseNliContradiction(str);
@@ -150,19 +252,23 @@ export async function syncFactsToSemanticGraph(
       const sourceId = findClaimNodeId(claimContentToNodeId, a);
       const targetId = findClaimNodeId(claimContentToNodeId, b);
       if (sourceId && targetId && sourceId !== targetId) {
-        await appendEdge(
-          {
-            scope_id: scopeId,
-            source_id: sourceId,
-            target_id: targetId,
-            edge_type: "contradicts",
-            weight: 1,
-            metadata: { raw: str },
-            created_by: FACTS_SYNC_SOURCE,
-          },
-          client,
-        );
-        edgesCreated++;
+        // Irreversible resolution: if a resolves edge exists, do not re-create contradiction
+        const resolved = await hasResolvingEdge(scopeId, sourceId, targetId, client);
+        if (!resolved) {
+          await appendEdge(
+            {
+              scope_id: scopeId,
+              source_id: sourceId,
+              target_id: targetId,
+              edge_type: "contradicts",
+              weight: 1,
+              metadata: { raw: str },
+              created_by: FACTS_SYNC_SOURCE,
+            },
+            client,
+          );
+          edgesCreated++;
+        }
       }
     }
   });
@@ -182,7 +288,9 @@ export async function syncFactsToSemanticGraph(
   logger.info("facts-sync: synced facts to semantic graph", {
     scopeId,
     nodesCreated,
+    nodesUpdated,
+    nodesStaled,
     edgesCreated,
   });
-  return { nodesCreated, edgesCreated };
+  return { nodesCreated, edgesCreated, nodesUpdated, nodesStaled };
 }

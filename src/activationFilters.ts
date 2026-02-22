@@ -6,12 +6,11 @@
 import { createHash } from "crypto";
 import pg from "pg";
 import type { S3Client } from "@aws-sdk/client-s3";
+import { getPool } from "./db.js";
 import { tailEvents, getLatestPipelineWalSeqForFacts } from "./contextWal.js";
 import { s3GetText, s3PutJson } from "./s3.js";
 
-const { Pool } = pg;
-
-export type FilterType = "hash_delta" | "sequence_delta" | "timer" | "composite";
+export type FilterType = "hash_delta" | "sequence_delta" | "timer" | "composite" | "pressure_directed";
 
 export interface FilterStats {
   activations: number;
@@ -41,20 +40,11 @@ export interface AgentMemory {
 
 export interface ActivationResult {
   shouldActivate: boolean;
+  reason: string;
   context: Record<string, unknown>;
 }
 
-let _pool: pg.Pool | null = null;
 let _tableEnsured = false;
-
-function getPool(): pg.Pool {
-  if (!_pool) {
-    const url = process.env.DATABASE_URL;
-    if (!url) throw new Error("DATABASE_URL is required for activation filters");
-    _pool = new Pool({ connectionString: url, max: 5 });
-  }
-  return _pool;
-}
 
 export function _resetFilterTableEnsured(): void {
   _tableEnsured = false;
@@ -257,49 +247,87 @@ export async function checkFilter(
 
   switch (config.type) {
     case "sequence_delta": {
-      // Facts uses "new context" seq only (bootstrap, context_doc) so the loop suspends after a full cycle.
       const latestSeq =
         config.agentRole === "facts"
           ? await getLatestPipelineWalSeqForFacts()
           : await getLatestWalSeq();
       const minNew = (config.params.minNewEvents as number) ?? 1;
       const delta = latestSeq - memory.lastProcessedSeq;
-      const shouldActivate =
-        delta >= minNew && (memory.lastActivatedAt === 0 || now - memory.lastActivatedAt >= cooldownMs);
-      return {
-        shouldActivate,
-        context: { latestSeq, previousSeq: memory.lastProcessedSeq },
-      };
+      const inCooldown = memory.lastActivatedAt !== 0 && now - memory.lastActivatedAt < cooldownMs;
+      const shouldActivate = delta >= minNew && !inCooldown;
+      const reason = shouldActivate
+        ? "activated"
+        : delta < minNew
+          ? `no_new_events (delta=${delta}, latestSeq=${latestSeq}, lastProcessedSeq=${memory.lastProcessedSeq})`
+          : `cooldown (${now - memory.lastActivatedAt}ms < ${cooldownMs}ms)`;
+      return { shouldActivate, reason, context: { latestSeq, previousSeq: memory.lastProcessedSeq } };
     }
     case "hash_delta": {
       const field = (config.params.field as string) ?? "facts/latest.json";
       const currentHash = await readHashFromS3(ctx.s3, ctx.bucket, field);
       const lastHash = field.includes("drift") ? memory.lastDriftHash : memory.lastHash;
       const changed = currentHash !== null && currentHash !== lastHash;
-      const shouldActivate =
-        changed && (memory.lastActivatedAt === 0 || now - memory.lastActivatedAt >= cooldownMs);
-      return {
-        shouldActivate,
-        context: { currentHash, previousHash: lastHash, field },
-      };
+      const inCooldown = memory.lastActivatedAt !== 0 && now - memory.lastActivatedAt < cooldownMs;
+      const shouldActivate = changed && !inCooldown;
+      const reason = shouldActivate
+        ? "activated"
+        : currentHash === null
+          ? `hash_missing (field=${field})`
+          : !changed
+            ? `hash_unchanged (field=${field})`
+            : `cooldown (${now - memory.lastActivatedAt}ms < ${cooldownMs}ms)`;
+      return { shouldActivate, reason, context: { currentHash, previousHash: lastHash, field } };
     }
     case "timer": {
       const shortMs = (config.params.shortIntervalMs as number) ?? 120000;
       const fullMs = (config.params.fullIntervalMs as number) ?? 600000;
       const elapsed = memory.lastActivatedAt === 0 ? Infinity : now - memory.lastActivatedAt;
       const shouldActivate = elapsed >= shortMs;
+      const reason = shouldActivate ? "activated" : `timer_wait (${elapsed}ms < ${shortMs}ms)`;
       return {
         shouldActivate,
-        context: {
-          lastActivatedAt: memory.lastActivatedAt,
-          elapsedMs: elapsed,
-          nextShortMs: shortMs,
-          nextFullMs: fullMs,
-        },
+        reason,
+        context: { lastActivatedAt: memory.lastActivatedAt, elapsedMs: elapsed, nextShortMs: shortMs, nextFullMs: fullMs },
       };
     }
+    case "pressure_directed": {
+      // Stigmergic pressure routing: activate only if this agent's dimension has high pressure.
+      // Params: scopeId (string), pressureThreshold (number, default 0.05), cooldownMs (number).
+      const scopeId = (config.params.scopeId as string) ?? "default";
+      const pressureThreshold = (config.params.pressureThreshold as number) ?? 0.05;
+      const inCooldown = memory.lastActivatedAt !== 0 && now - memory.lastActivatedAt < cooldownMs;
+      if (inCooldown) {
+        return { shouldActivate: false, reason: `cooldown (${now - memory.lastActivatedAt}ms < ${cooldownMs}ms)`, context: {} };
+      }
+      try {
+        const { loadConvergenceHistory } = await import("./convergenceTracker.js");
+        const history = await loadConvergenceHistory(scopeId, 1);
+        if (history.length === 0) {
+          return { shouldActivate: true, reason: "no_convergence_history_yet", context: {} };
+        }
+        const latest = history[history.length - 1];
+        const roleToDim: Record<string, string[]> = {
+          facts: ["claim_confidence"],
+          drift: ["contradiction_resolution"],
+          planner: ["goal_completion", "risk_score_inverse"],
+          status: ["claim_confidence", "contradiction_resolution", "goal_completion", "risk_score_inverse"],
+        };
+        const dims = roleToDim[config.agentRole] ?? [];
+        const agentPressure = dims.reduce((sum, d) => sum + (latest.pressure[d] ?? 0), 0);
+        const maxPressure = Math.max(...Object.values(latest.pressure), 0);
+        // Activate if agent's pressure is the highest (or within 80% of highest) and above threshold
+        const isHighPressure = agentPressure >= maxPressure * 0.8 && agentPressure >= pressureThreshold;
+        const reason = isHighPressure
+          ? `activated (pressure=${agentPressure.toFixed(3)}, max=${maxPressure.toFixed(3)})`
+          : `low_pressure (${agentPressure.toFixed(3)} < threshold or not highest)`;
+        return { shouldActivate: isHighPressure, reason, context: { agentPressure, maxPressure, dims } };
+      } catch {
+        // convergence_history table may not exist; fall back to allow activation
+        return { shouldActivate: true, reason: "convergence_unavailable_fallback", context: {} };
+      }
+    }
     default:
-      return { shouldActivate: false, context: {} };
+      return { shouldActivate: false, reason: "unknown_filter_type", context: {} };
   }
 }
 

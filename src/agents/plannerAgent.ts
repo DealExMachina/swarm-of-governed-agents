@@ -4,7 +4,7 @@ import { Agent } from "@mastra/core/agent";
 import { getChatModelConfig } from "../modelConfig.js";
 import { logger } from "../logger.js";
 import { s3GetText } from "../s3.js";
-import { loadPolicies, evaluateRules } from "../governance.js";
+import { loadPolicies, getGovernanceForScope, evaluateRules } from "../governance.js";
 import { makeReadDriftTool, makeReadFactsTool, makeReadGovernanceRulesTool } from "./sharedTools.js";
 
 const GOVERNANCE_PATH = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
@@ -70,7 +70,8 @@ export async function runPlannerAgent(
   const drift = driftRaw
     ? (JSON.parse(driftRaw) as { level: string; types: string[] })
     : { level: "none", types: [] as string[] };
-  const config = loadPolicies(GOVERNANCE_PATH);
+  const scopeId = process.env.SCOPE_ID ?? "default";
+  const config = getGovernanceForScope(scopeId, loadPolicies(GOVERNANCE_PATH));
   const actions = evaluateRules(drift, config);
   return { drift: { level: drift.level, types: drift.types }, actions };
 }

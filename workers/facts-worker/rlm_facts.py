@@ -364,18 +364,46 @@ def extract_facts_and_drift(
         raw = raw.rsplit("```", 1)[0].strip()
     facts_dict = json.loads(raw)
 
-    # Normalize list-type fields: if the LLM returns a dict instead of a flat list
-    # (e.g. entities: {"organizations": [...], "regulations": [...]}), flatten it.
-    for key in ("entities", "claims", "risks", "assumptions", "contradictions", "goals"):
-        val = facts_dict.get(key)
+    # Normalize list-type fields to List[str]:
+    # - If value is a dict (e.g. entities: {"organizations": [...]}), flatten to list of strings.
+    # - If value is a list of dicts (e.g. claims: [{"claim": "..."}, {"risk": "..."}]), extract string from each item.
+    def _to_string_list(val: Any) -> List[str]:
+        if val is None:
+            return []
         if isinstance(val, dict):
             flat = []
             for v in val.values():
                 if isinstance(v, list):
-                    flat.extend(str(item) for item in v)
+                    if v and isinstance(v[0], (dict, list)):
+                        flat.extend(_to_string_list(v))
+                    else:
+                        flat.extend(str(x) for x in v)
                 else:
                     flat.append(str(v))
-            facts_dict[key] = flat
+            return flat
+        if isinstance(val, list):
+            out: List[str] = []
+            for item in val:
+                if isinstance(item, str):
+                    out.append(item.strip() if item.strip() else item)
+                elif isinstance(item, dict):
+                    # Common LLM shapes: {"claim": "..."}, {"risk": "..."}, {"text": "..."}, etc.
+                    s = (
+                        item.get("claim") or item.get("risk") or item.get("assumption")
+                        or item.get("contradiction") or item.get("goal") or item.get("text")
+                        or item.get("entity") or (next((v for v in item.values() if isinstance(v, str)), None))
+                    )
+                    if s and isinstance(s, str):
+                        out.append(s.strip() or s)
+                    else:
+                        out.append(str(item))
+                else:
+                    out.append(str(item))
+            return out
+        return [str(val)]
+
+    for key in ("entities", "claims", "risks", "assumptions", "contradictions", "goals"):
+        facts_dict[key] = _to_string_list(facts_dict.get(key))
 
     facts = Facts(**facts_dict)
     # Merge GLiNER entities (dedupe)

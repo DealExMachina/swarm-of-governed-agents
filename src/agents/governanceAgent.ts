@@ -7,10 +7,11 @@ import { z } from "zod";
 import { Agent } from "@mastra/core/agent";
 import { s3GetText } from "../s3.js";
 import { loadState } from "../stateGraph.js";
-import { loadPolicies, canTransition } from "../governance.js";
+import { loadPolicies, getGovernanceForScope, canTransition } from "../governance.js";
 import { checkPermission } from "../policy.js";
 import { appendEvent } from "../contextWal.js";
 import { addPending } from "../mitlServer.js";
+import { isProcessed, markProcessed } from "../messageDedup.js";
 import type { EventBus } from "../eventBus.js";
 import { logger, setLogContext } from "../logger.js";
 import { recordProposal, recordPolicyViolation } from "../metrics.js";
@@ -119,7 +120,7 @@ function createOversightTools(
       if (actionPayload) {
         const { proposal_id, proposed_action } = proposal;
         recordProposal(proposed_action, "pending");
-        addPending(proposal_id, proposal, actionPayload);
+        await addPending(proposal_id, proposal, actionPayload);
         await env.getPublishAction()(`swarm.pending_approval.${proposal_id}`, {
           proposal_id,
           status: "pending",
@@ -170,9 +171,15 @@ export async function runOversightAgent(
   });
   const summary = `${deterministicResult.outcome}: ${deterministicResult.reason}`;
   const prompt = `Proposal: proposal_id=${proposal.proposal_id} agent=${proposal.agent} target_node=${proposal.target_node} payload=${JSON.stringify(proposal.payload)}. Deterministic result: ${summary}. Choose one: acceptDeterministic, escalateToLLM, or escalateToHuman. Call the corresponding tool.`;
+  const LLM_TIMEOUT_MS = 30000;
   const abortController = new AbortController();
+  const timeoutId = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
   setMaxListeners(64, abortController.signal);
-  await agent.generate(prompt, { maxSteps: 5, abortSignal: abortController.signal });
+  try {
+    await agent.generate(prompt, { maxSteps: 5, abortSignal: abortController.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!getChosen()) {
     logger.info("oversight agent did not call a tool; committing deterministic result", {
       proposal_id: proposal.proposal_id,
@@ -201,7 +208,7 @@ function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
       }).nullable(),
     }),
     execute: async () => {
-      const state = await loadState();
+      const state = await loadState(SCOPE_ID);
       return { state };
     },
   });
@@ -238,7 +245,7 @@ function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
         ? (JSON.parse(raw) as { level: string; types: string[] })
         : { level: "none", types: [] as string[] };
       const govPath = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
-      const governance = loadPolicies(govPath);
+      const governance = getGovernanceForScope(SCOPE_ID, loadPolicies(govPath));
       if (from === undefined || to === undefined) {
         return { allowed: false, reason: "missing_from_or_to" };
       }
@@ -272,7 +279,7 @@ function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
     execute: async (input) => {
       if (decided) return { ok: false, error: "already_decided" };
       const reason = (input as { reason?: string })?.reason ?? "policy_passed";
-      const state = await loadState();
+      const state = await loadState(SCOPE_ID);
       if (!state || state.epoch !== expectedEpoch) {
         return { ok: false, error: "state_epoch_mismatch" };
       }
@@ -281,7 +288,7 @@ function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
         ? (JSON.parse(driftRaw) as { level: string; types: string[] })
         : { level: "none", types: [] as string[] };
       const govPath = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
-      const governance = loadPolicies(govPath);
+      const governance = getGovernanceForScope(SCOPE_ID, loadPolicies(govPath));
       if (from === undefined || to === undefined) {
         return { ok: false, error: "missing_from_or_to" };
       }
@@ -302,7 +309,7 @@ function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
         result: "approved",
         reason,
         action_type: "advance_state",
-        payload: { expectedEpoch, runId: state.runId, from, to },
+        payload: { expectedEpoch, runId: state.runId, from, to, scope_id: SCOPE_ID },
       };
       await env.getPublishAction()("swarm.actions.advance_state", action as unknown as Record<string, unknown>);
       await appendEvent({
@@ -386,9 +393,15 @@ export async function processProposalWithAgent(
     },
   });
   const prompt = `Proposal: proposal_id=${proposal.proposal_id} agent=${proposal.agent} target_node=${proposal.target_node} payload=${JSON.stringify(proposal.payload)}. Decide approve or reject and call the corresponding tool.`;
+  const LLM_TIMEOUT_MS = 30000;
   const abortController = new AbortController();
+  const timeoutId = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
   setMaxListeners(64, abortController.signal);
-  await agent.generate(prompt, { maxSteps: 12, abortSignal: abortController.signal });
+  try {
+    await agent.generate(prompt, { maxSteps: 12, abortSignal: abortController.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!tools.isDecided()) {
     logger.info("governance agent did not decide; falling back to rule-based", { proposal_id: proposal.proposal_id });
     await processProposal(proposal, env);
@@ -409,7 +422,7 @@ export async function evaluateProposalDeterministic(
   }
 
   const { expectedEpoch, from, to } = payload as { expectedEpoch: number; from: string; to: string };
-  const state = await loadState();
+  const state = await loadState(SCOPE_ID);
   if (!state || state.epoch !== expectedEpoch) {
     return { outcome: "reject", reason: "state_epoch_mismatch" };
   }
@@ -419,7 +432,7 @@ export async function evaluateProposalDeterministic(
     ? (JSON.parse(driftRaw) as { level: string; types: string[] })
     : { level: "none", types: [] as string[] };
   const govPath = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
-  const governance = loadPolicies(govPath);
+  const governance = getGovernanceForScope(SCOPE_ID, loadPolicies(govPath));
 
   if (mode === "MASTER") {
     return {
@@ -513,7 +526,7 @@ export async function commitDeterministicResult(
 
   if (result.outcome === "pending" && result.actionPayload) {
     recordProposal(proposed_action, "pending");
-    addPending(proposal_id, proposal, result.actionPayload);
+    await addPending(proposal_id, proposal, result.actionPayload);
     await env.getPublishAction()(`swarm.pending_approval.${proposal_id}`, {
       proposal_id,
       status: "pending",
@@ -536,7 +549,7 @@ export async function commitDeterministicResult(
       result: "approved",
       reason: result.reason,
       action_type: "advance_state",
-      payload: result.actionPayload,
+      payload: { ...result.actionPayload, scope_id: SCOPE_ID },
     };
     await env.getPublishAction()("swarm.actions.advance_state", action as unknown as Record<string, unknown>);
     await appendEvent({
@@ -571,9 +584,32 @@ export async function runFinalityCheck(scopeId: string): Promise<void> {
       outcome: "review_requested",
       goal_score: result.request.goal_score,
     });
-    await submitFinalityReviewForScope(scopeId);
+    await submitFinalityReviewForScope(scopeId, result);
   } else {
     logger.info("finality outcome", { scope_id: scopeId, outcome: "ACTIVE" });
+  }
+}
+
+/** Dedicated consumer for swarm.finality.evaluate; acks only after runFinalityCheck succeeds (retry on failure). */
+async function runFinalityConsumerLoop(bus: EventBus): Promise<never> {
+  const stream = process.env.NATS_STREAM ?? "SWARM_JOBS";
+  const subject = "swarm.finality.evaluate";
+  const consumer = "finality-evaluator";
+  logger.info("finality consumer started", { subject, consumer });
+  while (true) {
+    const processed = await bus.consume(
+      stream,
+      subject,
+      consumer,
+      async (msg) => {
+        const scopeId = String((msg.data as Record<string, unknown>).scope_id ?? "default");
+        await runFinalityCheck(scopeId);
+      },
+      { timeoutMs: 5000, maxMessages: 10 },
+    );
+    if (processed === 0) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
   }
 }
 
@@ -586,9 +622,15 @@ export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket
   );
   startMitlServer(mitlPort);
 
+  void runFinalityConsumerLoop(bus);
+
   const subject = "swarm.proposals.>";
   const consumer = `governance-${AGENT_ID}`;
   logger.info("governance agent started", { subject, consumer });
+
+  const BACKOFF_MS = 500;
+  const BACKOFF_MAX_MS = 5000;
+  let delayMs = BACKOFF_MS;
 
   const env: GovernanceAgentEnv = {
     s3,
@@ -604,7 +646,8 @@ export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket
       NATS_STREAM,
       subject,
       consumer,
-      async (msg) => {
+      async (msg: { id: string; data: Record<string, unknown> }) => {
+        if (await isProcessed(consumer, msg.id)) return;
         const data = msg.data as unknown as Record<string, unknown>;
         const proposal: Proposal = {
           proposal_id: String(data.proposal_id ?? ""),
@@ -624,14 +667,16 @@ export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket
             await runOversightAgent(proposal, deterministicResult, env);
           }
         }
-        runFinalityCheck(SCOPE_ID).catch((err) => {
-          logger.error("finality check error", { scope_id: SCOPE_ID, error: String(err) });
-        });
+        await bus.publish("swarm.finality.evaluate", { scope_id: SCOPE_ID } as Record<string, string>);
+        await markProcessed(consumer, msg.id);
       },
       { timeoutMs: 5000, maxMessages: 10 },
     );
     if (processed === 0) {
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, delayMs));
+      delayMs = Math.min(delayMs * 2, BACKOFF_MAX_MS);
+    } else {
+      delayMs = BACKOFF_MS;
     }
   }
 }

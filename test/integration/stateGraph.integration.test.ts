@@ -28,51 +28,53 @@ describe.skipIf(!DATABASE_URL)("stateGraph integration", () => {
     await pool.end();
   });
 
+  const SCOPE = "default";
+
   it("initState creates singleton and loadState retrieves it", async () => {
-    const state = await initState("run-1", "ContextIngested", pool);
+    const state = await initState(SCOPE, "run-1", "ContextIngested", pool);
     expect(state.runId).toBe("run-1");
     expect(state.lastNode).toBe("ContextIngested");
     expect(state.epoch).toBe(0);
 
-    const loaded = await loadState(pool);
+    const loaded = await loadState(SCOPE, pool);
     expect(loaded).not.toBeNull();
     expect(loaded!.runId).toBe("run-1");
   });
 
   it("initState is idempotent (DO NOTHING on conflict)", async () => {
-    const first = await initState("run-1", "ContextIngested", pool);
-    const second = await initState("run-2", "FactsExtracted", pool);
+    const first = await initState(SCOPE, "run-1", "ContextIngested", pool);
+    const second = await initState(SCOPE, "run-2", "FactsExtracted", pool);
 
     expect(second.runId).toBe("run-1");
     expect(second.lastNode).toBe("ContextIngested");
   });
 
   it("advanceState succeeds with correct epoch", async () => {
-    await initState("run-1", "ContextIngested", pool);
+    await initState(SCOPE, "run-1", "ContextIngested", pool);
 
-    const advanced = await advanceState(0, pool);
+    const advanced = await advanceState(0, { scopeId: SCOPE }, pool);
     expect(advanced).not.toBeNull();
     expect(advanced!.lastNode).toBe("FactsExtracted");
     expect(advanced!.epoch).toBe(1);
   });
 
   it("advanceState fails with wrong epoch (CAS)", async () => {
-    await initState("run-1", "ContextIngested", pool);
+    await initState(SCOPE, "run-1", "ContextIngested", pool);
 
-    const result = await advanceState(999, pool);
+    const result = await advanceState(999, { scopeId: SCOPE }, pool);
     expect(result).toBeNull();
 
-    const state = await loadState(pool);
+    const state = await loadState(SCOPE, pool);
     expect(state!.lastNode).toBe("ContextIngested");
     expect(state!.epoch).toBe(0);
   });
 
   it("two concurrent advanceState calls: only one wins", async () => {
-    await initState("run-1", "ContextIngested", pool);
+    await initState(SCOPE, "run-1", "ContextIngested", pool);
 
     const [a, b] = await Promise.all([
-      advanceState(0, pool),
-      advanceState(0, pool),
+      advanceState(0, { scopeId: SCOPE }, pool),
+      advanceState(0, { scopeId: SCOPE }, pool),
     ]);
 
     const winners = [a, b].filter((r) => r !== null);
@@ -82,15 +84,15 @@ describe.skipIf(!DATABASE_URL)("stateGraph integration", () => {
   });
 
   it("full cycle: ContextIngested -> FactsExtracted -> DriftChecked -> ContextIngested", async () => {
-    await initState("run-1", "ContextIngested", pool);
+    await initState(SCOPE, "run-1", "ContextIngested", pool);
 
-    const s1 = await advanceState(0, pool);
+    const s1 = await advanceState(0, { scopeId: SCOPE }, pool);
     expect(s1!.lastNode).toBe("FactsExtracted");
 
-    const s2 = await advanceState(1, pool);
+    const s2 = await advanceState(1, { scopeId: SCOPE }, pool);
     expect(s2!.lastNode).toBe("DriftChecked");
 
-    const s3 = await advanceState(2, pool);
+    const s3 = await advanceState(2, { scopeId: SCOPE }, pool);
     expect(s3!.lastNode).toBe("ContextIngested");
     expect(s3!.epoch).toBe(3);
   });

@@ -109,6 +109,7 @@ export async function makeEventBus(natsUrl?: string): Promise<EventBus> {
           ack_policy: AckPolicy.Explicit,
           deliver_policy: DeliverPolicy.All,
           filter_subject: subject,
+          max_ack_pending: 100,
         });
       }
 
@@ -134,40 +135,51 @@ export async function makeEventBus(natsUrl?: string): Promise<EventBus> {
 
     async subscribe(stream, subject, consumer, handler) {
       await ensureStreamFn(stream, [subject]);
-      const inbox = createInbox();
-      const opts = consumerOpts()
-        .durable(consumer)
-        .deliverTo(inbox)
-        .ackExplicit()
-        .deliverNew()
-        .filterSubject(subject);
-
-      const sub = await js.subscribe(subject, opts);
       let closed = false;
+      let currentSub: Awaited<ReturnType<typeof js.subscribe>> | null = null;
+      const BACKOFF_MS = 1000;
+      const BACKOFF_MAX_MS = 30000;
 
       (async () => {
-        try {
-          for await (const m of sub) {
+        let delayMs = BACKOFF_MS;
+        while (!closed) {
+          try {
+            const inbox = createInbox();
+            const opts = consumerOpts()
+              .durable(consumer)
+              .deliverTo(inbox)
+              .ackExplicit()
+              .deliverNew()
+              .filterSubject(subject);
+            currentSub = await js.subscribe(subject, opts);
+            delayMs = BACKOFF_MS;
+
+            for await (const m of currentSub) {
+              if (closed) break;
+              const raw = sc.decode(m.data);
+              let data: Record<string, unknown>;
+              try {
+                data = JSON.parse(raw) as Record<string, unknown>;
+              } catch {
+                data = { raw };
+              }
+              const id = String(m.seq ?? "");
+              try {
+                await handler({ id: String(id), data });
+              } finally {
+                m.ack();
+              }
+            }
+          } catch (err) {
             if (closed) break;
-            const raw = sc.decode(m.data);
-            let data: Record<string, unknown>;
-            try {
-              data = JSON.parse(raw) as Record<string, unknown>;
-            } catch {
-              data = { raw };
-            }
-            const id = String(m.seq ?? "");
-            try {
-              await handler({ id: String(id), data });
-            } finally {
-              m.ack();
-            }
-          }
-        } catch (err) {
-          if (!closed) {
             const msg = toErrorString(err);
-            process.stderr.write(JSON.stringify({ ts: new Date().toISOString(), level: "error", msg: "subscribe loop error", error: msg }) + "\n");
-            process.exit(1);
+            process.stderr.write(JSON.stringify({ ts: new Date().toISOString(), level: "error", msg: "subscribe loop error, reconnecting", error: msg }) + "\n");
+            if (currentSub) {
+              try { await currentSub.destroy(); } catch {}
+              currentSub = null;
+            }
+            await new Promise((r) => setTimeout(r, delayMs));
+            delayMs = Math.min(delayMs * 2, BACKOFF_MAX_MS);
           }
         }
       })();
@@ -175,7 +187,9 @@ export async function makeEventBus(natsUrl?: string): Promise<EventBus> {
       return {
         async unsubscribe() {
           closed = true;
-          await sub.destroy();
+          if (currentSub) {
+            try { await currentSub.destroy(); } catch {}
+          }
         },
       };
     },

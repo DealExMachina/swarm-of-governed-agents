@@ -1,6 +1,6 @@
 /**
  * Test real access to Postgres (pgvector) and Ollama.
- * Run: npx ts-node --esm scripts/test-postgres-ollama.ts
+ * Run: pnpm run test:postgres-ollama
  * Requires: DATABASE_URL, and for Ollama OLLAMA_BASE_URL (default localhost:11434).
  */
 import "dotenv/config";

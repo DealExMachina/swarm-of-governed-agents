@@ -74,7 +74,7 @@ Postgres with pgvector. Claims, goals, risks, and assessments are nodes. Contrad
 ## Prerequisites
 
 - Docker and Docker Compose installed
-- Node.js 20+ and npm
+- Node.js 20+ and pnpm (or npm; lockfile is pnpm-lock.yaml)
 - Either an OpenAI API key or Ollama running locally with a compatible model
 
 For local Ollama, you need the extraction model:
@@ -87,44 +87,43 @@ ollama pull qwen3:8b
 ## Setup
 
 ```bash
-cd swarm-v0.1
 cp .env.example .env
 # Edit .env: set OPENAI_API_KEY or OLLAMA_BASE_URL
 
-docker compose up -d postgres s3 nats facts-worker feed
-npm install
+docker compose up -d postgres s3 nats facts-worker
+pnpm install
 
 # First run: wait up to 5 minutes for facts-worker to install Python deps
-CHECK_SERVICES_MAX_WAIT_SEC=300 npm run check:services
+CHECK_SERVICES_MAX_WAIT_SEC=300 pnpm run check:services
 ```
 
-Apply database migrations:
+Apply database migrations and initialize infrastructure (run from repo root):
 ```bash
-export PGPASSWORD="${POSTGRES_PASSWORD:-swarm}"
-psql -h localhost -p 5433 -U swarm -d swarm -f migrations/002_context_wal.sql
-psql -h localhost -p 5433 -U swarm -d swarm -f migrations/003_swarm_state.sql
-psql -h localhost -p 5433 -U swarm -d swarm -f migrations/005_semantic_graph.sql
-psql -h localhost -p 5433 -U swarm -d swarm -f migrations/006_scope_finality_decisions.sql
+pnpm run ensure-bucket
+pnpm run ensure-schema   # runs all migrations in migrations/ (002–009)
+pnpm run ensure-stream
+# Optional: pnpm run bootstrap-once
 ```
 
-Initialize infrastructure:
-```bash
-npm run ensure-bucket
-npm run ensure-stream
-npm run bootstrap-once
-```
+**Local demo auth:** For local use, either leave `SWARM_API_TOKEN` unset (feed and MITL allow unauthenticated requests) or set `DISABLE_FEED_AUTH=1` in `.env`. If you set `SWARM_API_TOKEN` and do not set `DISABLE_FEED_AUTH=1`, the demo server and `run-demo.sh` will send the Bearer token when calling the feed and MITL.
 
 To use the M&A-specific governance rules for this demo, set the governance path before starting the swarm:
 ```bash
 export GOVERNANCE_PATH="$(pwd)/demo/scenario/governance-demo.yaml"
 ```
 
-Start the swarm (in a dedicated terminal):
-```bash
-npm run swarm:all
-```
+**Run order:** Start services in this order (each in its own terminal, or run feed and demo after the swarm is up):
 
-Open the live dashboard: [http://localhost:3002](http://localhost:3002)
+1. Docker: `docker compose up -d postgres s3 nats facts-worker`
+2. Schema and stream: `pnpm run ensure-bucket && pnpm run ensure-schema && pnpm run ensure-stream`
+3. Swarm (agents + governance + executor): `pnpm run swarm:all`
+4. Feed server (required for demo): `pnpm run feed` — serves port 3002
+5. Demo UI (optional): `pnpm run demo` — serves port 3003
+
+The feed server is separate from the swarm: it serves the summary API and context ingestion. Start it before opening the demo or running `./demo/run-demo.sh`.
+
+- Live feed dashboard: [http://localhost:3002](http://localhost:3002)
+- Demo UI: [http://localhost:3003](http://localhost:3003)
 
 ---
 
@@ -134,7 +133,7 @@ Open the live dashboard: [http://localhost:3002](http://localhost:3002)
 
 Start the demo server on port 3003:
 ```bash
-npm run demo
+pnpm run demo
 ```
 
 Then open [http://localhost:3003](http://localhost:3003) in a browser.
@@ -171,9 +170,9 @@ To start at a specific step:
 
 Feed all five documents with a configurable delay and observe via the existing feed UI at [http://localhost:3002](http://localhost:3002):
 ```bash
-npm run seed:demo                        # 20s gap between documents (default)
-DEMO_DELAY_MS=10000 npm run seed:demo   # 10s gap (faster)
-DEMO_DOC=02 npm run seed:demo            # single document by prefix
+pnpm run seed:demo                        # 20s gap between documents (default)
+DEMO_DELAY_MS=10000 pnpm run seed:demo   # 10s gap (faster)
+DEMO_DOC=02 pnpm run seed:demo            # single document by prefix
 ```
 
 ---
@@ -499,11 +498,11 @@ Set `FACTS_SYNC_EMBED=1` in `.env` and ensure Ollama is serving `bge-m3`. Claim 
 
 | Path | Purpose |
 |---|---|
-| `demo/demo-server.ts` | Demo UI server — `npm run demo` — opens at http://localhost:3003 |
+| `demo/demo-server.ts` | Demo UI server — `pnpm run demo` — opens at http://localhost:3003 |
 | `demo/scenario/docs/` | The five Project Horizon documents |
 | `demo/scenario/governance-demo.yaml` | M&A-specific governance rules for this demo |
 | `demo/run-demo.sh` | Shell walkthrough (alternative to the UI) |
-| `scripts/seed-demo.ts` | Programmatic document feeder (`npm run seed:demo`) |
+| `scripts/seed-demo.ts` | Programmatic document feeder (`pnpm run seed:demo`) |
 | `governance.yaml` | Default governance config (not M&A-specific) |
 | `finality.yaml` | Finality thresholds and state conditions |
 | `src/feed.ts` | Feed server source (port 3002) |

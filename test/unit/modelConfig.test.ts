@@ -113,7 +113,7 @@ describe("modelConfig", () => {
       vi.stubEnv("OLLAMA_BASE_URL", "http://localhost:11434");
       const cfg = getChatModelConfig();
       expect(cfg).not.toBeNull();
-      expect(cfg!.url).toBe("http://localhost:11434");
+      expect(cfg!.url).toBe("http://localhost:11434/v1");
       expect(cfg!.apiKey).toBe("ollama");
       expect(cfg!.id).toContain("qwen3");
     });

@@ -7,6 +7,14 @@ goal_gradient:
   near_finality_threshold: 0.40
   auto_finality_threshold: 0.92
 
+convergence:
+  beta: 3                    # Monotonicity window: require score non-decreasing for β rounds before auto-resolve (Aegean)
+  tau: 3                     # Plateau detection window: consecutive rounds below progress threshold (MACI)
+  ema_alpha: 0.3             # EMA smoothing factor for progress ratio
+  plateau_threshold: 0.01    # Progress ratio below which counts as plateau
+  history_depth: 20          # Convergence points to keep in analysis window
+  divergence_rate: -0.05     # Convergence rate α below this triggers divergence alert
+
 finality:
   RESOLVED:
     mode: all

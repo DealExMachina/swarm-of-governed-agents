@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { join } from "path";
 import {
   loadPolicies,
+  getGovernanceForScope,
   evaluateRules,
   canTransition,
   type DriftInput,
@@ -18,6 +19,32 @@ describe("governance", () => {
       expect(config.rules.length).toBeGreaterThanOrEqual(4);
       expect(config.rules[0].action).toBe("open_investigation");
       expect(config.rules[0].when.drift_type).toBe("contradiction");
+    });
+  });
+
+  describe("getGovernanceForScope", () => {
+    it("returns same config when no scopes", () => {
+      const config: GovernanceConfig = { mode: "YOLO", rules: [] };
+      expect(getGovernanceForScope("any", config)).toBe(config);
+    });
+    it("overrides mode for scope in scopes", () => {
+      const config: GovernanceConfig = {
+        mode: "YOLO",
+        rules: [],
+        scopes: { financial_dd: { mode: "MITL" } },
+      };
+      const out = getGovernanceForScope("financial_dd", config);
+      expect(out.mode).toBe("MITL");
+      expect(out.rules).toEqual(config.rules);
+    });
+    it("falls back to top-level mode for unknown scope", () => {
+      const config: GovernanceConfig = {
+        mode: "MASTER",
+        rules: [],
+        scopes: { other: { mode: "YOLO" } },
+      };
+      const out = getGovernanceForScope("unknown_scope", config);
+      expect(out.mode).toBe("MASTER");
     });
   });
 

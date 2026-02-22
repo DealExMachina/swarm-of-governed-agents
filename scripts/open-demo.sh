@@ -5,13 +5,14 @@
 #   BROWSER=chromium npm run demo:open   # use chromium binary if in PATH
 #   BROWSER=firefox npm run demo:open
 set -euo pipefail
+cd "$(dirname "$0")/.."
+# Prefer pnpm when lockfile is pnpm (repo is pnpm-managed)
+if command -v pnpm >/dev/null 2>&1 && [ -f pnpm-lock.yaml ]; then RUNNER=pnpm; else RUNNER=npm; fi
 
 DEMO_PORT="${DEMO_PORT:-3003}"
 DEMO_URL="http://localhost:${DEMO_PORT}"
 BROWSER="${BROWSER:-}"
 WAIT_MAX="${WAIT_MAX:-20}"
-
-cd "$(dirname "$0")/.."
 
 # Wait for something to be listening on DEMO_PORT
 wait_for_port() {
@@ -29,7 +30,7 @@ wait_for_port() {
 # Start demo server if port not in use
 if ! lsof -iTCP:"$DEMO_PORT" -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
   echo "Starting demo server on port ${DEMO_PORT}..."
-  npm run demo > /tmp/demo.log 2>&1 &
+  $RUNNER run demo > /tmp/demo.log 2>&1 &
   DEMO_PID=$!
   if ! wait_for_port; then
     echo "Demo server did not start in time. Check /tmp/demo.log"

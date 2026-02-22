@@ -112,7 +112,7 @@ The semantic graph (Postgres + pgvector, migration `005_semantic_graph.sql`) hol
 
 **Facts sync:** After each facts extraction, the facts agent writes to S3 and calls `syncFactsToSemanticGraph(scopeId, facts)`, which replaces fact-sourced nodes/edges for that scope and inserts claim, goal, and risk nodes (and contradiction edges). Set `FACTS_SYNC_EMBED=1` to embed claim nodes with Ollama `bge-m3` (1024-d); requires Ollama and the embedding model.
 
-**Scripts:** `npm run test:postgres-ollama` verifies Postgres (migrations 002/003/005) and Ollama embedding. `npm run seed:hitl` seeds the semantic graph with a deterministic near-finality state (e.g. one unresolved contradiction) so that when the swarm runs, a finality review appears in the MITL queue. See STATUS.md for the full flow.
+**Scripts:** `pnpm run test:postgres-ollama` verifies Postgres (migrations 002/003/005) and Ollama embedding. `pnpm run seed:hitl` seeds the semantic graph with a deterministic near-finality state (e.g. one unresolved contradiction) so that when the swarm runs, a finality review appears in the MITL queue. See STATUS.md for the full flow.
 
 ---
 
@@ -131,19 +131,19 @@ The semantic graph (Postgres + pgvector, migration `005_semantic_graph.sql`) hol
 
 ## Run locally
 
-**Prerequisites:** Docker. OpenAI key or Ollama running locally with the extraction model pulled (e.g. `ollama pull qwen3:8b`).
+**Prerequisites:** Docker. Node 20+; pnpm (recommended; lockfile is `pnpm-lock.yaml`). OpenAI key or Ollama running locally with the extraction model pulled (e.g. `ollama pull qwen3:8b`).
 
 ```bash
 cp .env.example .env
 # Edit .env: set OPENAI_API_KEY or OLLAMA_BASE_URL=http://host.docker.internal:11434
 docker compose up -d postgres s3 nats facts-worker feed
-npm i
+pnpm install
 ```
 
 **Preflight** — ensures Postgres, S3, NATS, and facts-worker are reachable before starting. Use `CHECK_SERVICES_MAX_WAIT_SEC=300` on first run (facts-worker installs Python deps on startup):
 
 ```bash
-CHECK_SERVICES_MAX_WAIT_SEC=300 npm run check:services
+CHECK_SERVICES_MAX_WAIT_SEC=300 pnpm run check:services
 ```
 
 **Migrations:**
@@ -159,10 +159,10 @@ psql -h localhost -p 5433 -U "${POSTGRES_USER:-swarm}" -d "${POSTGRES_DB:-swarm}
 **Seed, bootstrap, and launch:**
 
 ```bash
-npm run ensure-bucket && npm run ensure-stream
-npm run seed:all
-npm run bootstrap-once
-npm run swarm:all       # starts 4 agents + governance + executor; check:services runs first
+pnpm run ensure-bucket && pnpm run ensure-stream
+pnpm run seed:all
+pnpm run bootstrap-once
+pnpm run swarm:all       # starts 4 agents + governance + executor; check:services runs first
 ```
 
 **Feed and summary:**
@@ -203,21 +203,21 @@ Set in `governance.yaml`:
 
 | Script | Purpose |
 |--------|---------|
-| `npm run swarm:all` | Start four agents + governance + executor. Runs preflight first. |
-| `npm run check:services` | Preflight (Postgres, S3, NATS, facts-worker). Supports `CHECK_SERVICES_MAX_WAIT_SEC`, `CHECK_FEED=1`. |
-| `npm run bootstrap-once` | Publish bootstrap job and append bootstrap WAL event. |
-| `npm run seed:all` | Seed context WAL from `seed-docs/`. |
-| `npm run seed:hitl` | Seed semantic graph for a deterministic HITL finality scenario. |
-| `npm run seed:governance-e2e` | Seed state/drift and publish MASTER/MITL/YOLO proposals for governance path E2E. |
-| `npm run verify:governance-paths` | Verify context_events contain expected governance paths (run after seed:governance-e2e and governance). |
-| `npm run reset-e2e` | Truncate DB, empty S3, delete NATS stream. |
-| `npm run ensure-stream` | Create or update NATS stream. |
-| `npm run ensure-bucket` | Create S3 bucket if missing. |
-| `npm run ensure-pull-consumers` | Recreate consumers as pull (fix "push consumer not supported"). |
-| `npm run feed` | Run feed server (port 3002). |
-| `npm run observe` | Tail NATS events in the terminal. |
-| `npm run check:model` | Test OpenAI-compatible endpoint from `.env`. |
-| `npm run test:postgres-ollama` | Verify Postgres (migrations 002/003/005) and Ollama embedding (bge-m3). |
+| `pnpm run swarm:all` | Start four agents + governance + executor. Runs preflight first. |
+| `pnpm run check:services` | Preflight (Postgres, S3, NATS, facts-worker). Supports `CHECK_SERVICES_MAX_WAIT_SEC`, `CHECK_FEED=1`. |
+| `pnpm run bootstrap-once` | Publish bootstrap job and append bootstrap WAL event. |
+| `pnpm run seed:all` | Seed context WAL from `seed-docs/`. |
+| `pnpm run seed:hitl` | Seed semantic graph for a deterministic HITL finality scenario. |
+| `pnpm run seed:governance-e2e` | Seed state/drift and publish MASTER/MITL/YOLO proposals for governance path E2E. |
+| `pnpm run verify:governance-paths` | Verify context_events contain expected governance paths (run after seed:governance-e2e and governance). |
+| `pnpm run reset-e2e` | Truncate DB, empty S3, delete NATS stream. |
+| `pnpm run ensure-stream` | Create or update NATS stream. |
+| `pnpm run ensure-bucket` | Create S3 bucket if missing. |
+| `pnpm run ensure-pull-consumers` | Recreate consumers as pull (fix "push consumer not supported"). |
+| `pnpm run feed` | Run feed server (port 3002). |
+| `pnpm run observe` | Tail NATS events in the terminal. |
+| `pnpm run check:model` | Test OpenAI-compatible endpoint from `.env`. |
+| `pnpm run test:postgres-ollama` | Verify Postgres (migrations 002/003/005) and Ollama embedding (bge-m3). |
 
 **E2E:** Run `./scripts/run-e2e.sh` to start Docker, run migrations (002/003/005), seed, bootstrap, swarm, POST a doc, and verify nodes/edges. Requires Postgres, MinIO, NATS, facts-worker, and feed. Set `FACTS_SYNC_EMBED=1` to verify claim embeddings are written. For facts-worker in Docker with Ollama on the host, set `OLLAMA_BASE_URL=http://host.docker.internal:11434` in `.env` (see `.env.example`).
 
@@ -226,8 +226,8 @@ Set in `governance.yaml`:
 ## Tests
 
 ```bash
-npm run test          # TypeScript unit + integration (Vitest)
-npm run test:watch
+pnpm run test          # TypeScript unit + integration (Vitest)
+pnpm run test:watch
 ```
 
 ```bash
@@ -240,10 +240,10 @@ pytest tests/ -v      # Python facts-worker unit + integration
 
 ## Optional
 
-- **HITL finality scenario:** `npm run seed:hitl` seeds a near-finality state with an unresolved contradiction. Run the swarm; when governance evaluates finality, a `finality_review` appears in the MITL queue with explanation and options. See STATUS.md.
-- **Governance path E2E:** `npm run seed:governance-e2e` publishes MASTER/MITL/YOLO proposals; after the governance agent runs, `npm run verify:governance-paths` checks that context_events contain the expected auditable paths (processProposal, and optionally oversight_*). See STATUS.md "Governance paths and E2E audit".
+- **HITL finality scenario:** `pnpm run seed:hitl` seeds a near-finality state with an unresolved contradiction. Run the swarm; when governance evaluates finality, a `finality_review` appears in the MITL queue with explanation and options. See STATUS.md.
+- **Governance path E2E:** `pnpm run seed:governance-e2e` publishes MASTER/MITL/YOLO proposals; after the governance agent runs, `pnpm run verify:governance-paths` checks that context_events contain the expected auditable paths (processProposal, and optionally oversight_*). See STATUS.md "Governance paths and E2E audit".
 - **Embeddings:** Set `FACTS_SYNC_EMBED=1` + Ollama serving `bge-m3`. Claim nodes get 1024-d embeddings for semantic search.
-- **Tuner agent:** `AGENT_ROLE=tuner npm run swarm` runs a periodic loop (every ~30min) that uses an LLM to optimize activation filter configs based on productive/wasted ratio stats.
+- **Tuner agent:** `AGENT_ROLE=tuner pnpm run swarm` runs a periodic loop (every ~30min) that uses an LLM to optimize activation filter configs based on productive/wasted ratio stats.
 - **Observability:** Configure `OTEL_*` in `.env` to send traces and metrics to the otel-collector.
 
 For current status, verified functionality, and next steps, see **STATUS.md**.

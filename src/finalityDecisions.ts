@@ -5,19 +5,7 @@
  */
 
 import pg from "pg";
-
-const { Pool } = pg;
-
-let _pool: pg.Pool | null = null;
-
-function getPool(): pg.Pool {
-  if (!_pool) {
-    const url = process.env.DATABASE_URL;
-    if (!url) throw new Error("DATABASE_URL is required for finality decisions");
-    _pool = new Pool({ connectionString: url, max: 5 });
-  }
-  return _pool;
-}
+import { getPool } from "./db.js";
 
 export type FinalityOption = "approve_finality" | "provide_resolution" | "escalate" | "defer";
 
