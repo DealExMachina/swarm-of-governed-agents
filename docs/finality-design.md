@@ -3,6 +3,7 @@
 **Branch:** `feature/finality-design`
 **Status:** Architecture Review — NOT YET IMPLEMENTING
 **Date:** 2026-02-22
+**Last updated:** 2026-02-22 — Incorporated stakeholder decisions and cross-domain research
 
 ---
 
@@ -17,6 +18,21 @@
 7. [High-Level Implementation Plan](#7-high-level-implementation-plan)
 8. [Risk Register](#8-risk-register)
 9. [Resources & References](#9-resources--references)
+
+---
+
+## Stakeholder Decisions Log
+
+| Decision | Resolution | Impact |
+|----------|-----------|--------|
+| Session/Round entities | **scope_id = session, epoch = round.** No new entities. Stay with existing model. | Issue 2 resolved — no new tables, extend existing scope/epoch |
+| Gate A placement | **Gate A → governance layer.** Covered in `governance-design.md` Section 7. | Issue 3 resolved — finality evaluator handles Gates B, C, D only |
+| Gate D design | **Maintain separation.** Time-bounded heuristic, not queue inspection. | Issue 4 confirmed — `idle_cycles + pressure == 0 + quiescence_window` |
+| Severity/materiality | **Implement.** Cross-domain model based on 5-domain research below. | Issue 5 resolved — new section with full model |
+| Evidence coverage | **Domain-dependent.** 5-domain research revealed universal 4-level hierarchy. | Issue 6 resolved — new section with cross-domain schema |
+| Coordination signal | **Agent-to-agent uncommitting exchange plane.** 6 signal types, dual NATS/PG. | Issue 7 resolved — new architecture section below |
+| Protocol switching | **YAML switch rules first.** More interesting models to explore later. | Issue 8 confirmed — YAML config in `finality.yaml` |
+| Policy engine | **OPA-WASM confirmed.** Alignment with governance PRD. | Issue 9 resolved — single engine choice |
 
 ---
 
@@ -177,144 +193,453 @@ swarm.finality.evaluate →
 
 #### Issue 2: "Session" and "Round" definitions overlap with existing scope/epoch model
 
+> **✅ Decided:** scope_id = session, epoch = round. Stay with existing model. No new entities.
+
 **Problem:** The PRD defines `Session = ⟨session_id, scope, start_event, end_event?⟩` and `Round` as a time-bounded window. The codebase already has:
 - **Scopes** (`scope_id`) — equivalent to sessions
 - **Epochs** (integer, CAS-incremented in `stateGraph.ts`) — equivalent to rounds
 - **State machine** (ContextIngested → FactsExtracted → DriftChecked → cycle) — round boundaries
 
-Introducing new session/round abstractions alongside existing scope/epoch creates confusion unless they're explicitly mapped.
+**Resolution:** The existing `scope_id` and `epoch` serve as session and round respectively. No new abstractions needed.
 
-**Recommendation:** Define sessions as a **superset** of scopes: a session can span multiple scope lifecycles. Rounds should alias to epochs (or to explicit N-epoch windows if sub-epoch granularity is needed). Document the mapping:
-
-| PRD Concept | Existing Code | Proposed Extension |
-|-------------|--------------|-------------------|
-| Session | `scope_id` | Add `session_id` as parent grouping; scope_id remains the unit of finality |
-| Round | `epoch` in `swarm_state` | Optionally: N-epoch rounds for coarser metrics. Default: round = epoch. |
+| PRD Concept | Maps To | Notes |
+|-------------|---------|-------|
+| Session | `scope_id` | Already used as the unit of finality. Lifecycle events (`session_started`, `session_finalized`) added to WAL. |
+| Round | `epoch` in `swarm_state` | CAS-incremented integer. Each epoch = one round. Metrics snapshots taken per epoch. |
 | Start event | First `context_events` entry for scope | Formalize as `session_started` event type |
 | End event | `evaluateFinality()` → RESOLVED | Formalize as `session_finalized` event type with certificate |
 
+No `sessions` table needed. The `swarm_state` table already tracks `scope_id` + `epoch`. Session lifecycle is expressed through event types in the existing WAL.
+
 #### Issue 3: Gate A (authorization stability) is governance, not finality
+
+> **✅ Decided:** Gate A belongs in the governance layer. See `governance-design.md` Section 7 for full specification.
 
 **Problem:** Gate A ("no pending high-impact actions remain blocked by missing permissions/approvals") is a governance gate, not a convergence gate. It checks authorization state, which is the domain of the governance pipeline (OpenFGA + OPA from the governance PRD).
 
-Mixing governance checks into finality evaluation creates coupling between two layers that should be independent. The governance layer should clear authorization blockers *before* finality evaluates epistemic stability.
-
-**Recommendation:** Gate A should be a **precondition** checked by the governance layer, not evaluated inside `evaluateFinality()`. If authorization blockers exist, the proposal should not even reach finality evaluation. Instead:
+**Resolution:** Gate A is implemented as a **governance precondition**. The finality evaluator queries Gate A status but does not execute governance logic:
 
 ```
-Governance pipeline: Check Gate A → if blocked, route to MITL
-Finality evaluator: Check Gates B, C, D only (already partially the case)
+Governance pipeline: evaluateGateA(scopeId) → { stable, blockers[] }
+Finality evaluator: if !gateA.stable → skip evaluation, return ACTIVE
+                    if gateA.stable → proceed with Gates B, C, D
 ```
 
-The existing `governance.yaml` transition rules already block state advances on critical drift. Extend this to block on authorization gaps too.
+Gate A is defined as OPA Rego policies in the governance bundle (`policies/swarm/governance/gate_a.rego`), evaluated via OPA-WASM. Full specification in `governance-design.md` Section 7.
 
 #### Issue 4: Gate D (operational quiescence) needs careful definition
 
+> **✅ Decided:** Maintain separation from governance. Implement as time-bounded heuristic.
+
 **Problem:** "No pending proposals in queue that are admissible and relevant" requires the finality evaluator to inspect the NATS consumer queue, which breaks the current separation between event bus and evaluator.
 
-**Questions:**
-- What counts as "admissible and relevant"? A proposal in the facts_extracted queue may be stale.
-- How do you distinguish "no more work" from "slow producer"?
-- What about proposals in-flight (being processed by an agent)?
+**Resolution:** Quiescence is a **time-bounded heuristic**, not a queue inspection. Three conditions must hold simultaneously:
 
-**Recommendation:** Implement quiescence as a **time-bounded heuristic**, not a queue inspection:
-- `scope.last_delta_age_ms >= quiescence_window` (e.g., 60s with no state change)
-- Combined with `activation_pressure == 0` (no pressure-directed agents triggered)
-- The existing `scope.idle_cycles` condition in `finality.yaml` already approximates this
+| Condition | Source | Rationale |
+|-----------|--------|-----------|
+| `scope.idle_cycles >= threshold` | `finality.yaml` (existing) | No state machine advancement for N cycles |
+| `activation_pressure_total == 0` | `computePressure()` (existing) | No pressure-directed agents triggered |
+| `scope.last_delta_age_ms >= quiescence_window_ms` | `swarm_state` timestamp | Real wall-clock time without activity (distinguishes "slow" from "done") |
+
+The existing `scope.idle_cycles` condition in `finality.yaml` already approximates this. The implementation adds pressure check and age check as additional guards. No NATS queue inspection needed.
 
 #### Issue 5: Contradiction "mass" needs a materiality model
 
+> **✅ Decided:** Implement severity/materiality model. Full design below.
+
 **Problem:** The PRD defines `mass(U) = weighted sum by severity/materiality` but doesn't specify how severity/materiality is assigned to contradictions. The current system counts unresolved contradictions but doesn't weight them.
 
-**Questions:**
-- Who assigns severity? The agent that detected the contradiction? A governance rule? A domain schema?
-- What scale? (low/medium/high/critical? 0-1 continuous?)
-- Does materiality come from the objects the contradiction touches (e.g., financial claims > informational claims)?
+**Resolution — Severity/Materiality Model:**
 
-**Recommendation:** Model contradiction severity on the edge metadata in the semantic graph:
+##### 5a. Severity classification
+
+Severity is assigned **at contradiction detection time** by the facts agent, based on the type and scope of the contradiction:
+
+| Severity | Weight | Criteria | Examples |
+|----------|--------|----------|----------|
+| `low` | 0.1 | Cosmetic or non-functional disagreement | Formatting differences, metadata conflicts |
+| `medium` | 0.3 | Factual disagreement that doesn't block decisions | Divergent estimates within tolerance, conflicting secondary sources |
+| `high` | 0.6 | Factual disagreement that could change outcomes | Conflicting financial figures, contradictory legal interpretations |
+| `critical` | 1.0 | Contradiction on a hard-gate evidence item | Missing vs. present compliance certificate, contradictory regulatory status |
+
+Severity assignment rules can be expressed in the evidence schema (see Issue 6) or as OPA policies. The facts agent proposes severity; the governance agent can override via policy.
+
+##### 5b. Materiality scoring
+
+Materiality is **domain-contextual** — it reflects the importance of what the contradiction touches. It is a `[0, 1]` normalized score derived from:
+
+| Factor | Weight | Source |
+|--------|--------|--------|
+| Evidence category weight | 0.4 | From `evidence_schemas.yaml` — how important is this category in the domain? |
+| Object financial exposure | 0.3 | From claim metadata — what dollar/risk amount is at stake? Normalized to `[0,1]` within the scope. |
+| Dependency count | 0.2 | From semantic graph — how many other claims depend on the contradicted claims? |
+| Temporal urgency | 0.1 | From claim metadata — is there a deadline associated with the contradicted claims? |
 
 ```typescript
-// Current: edge type "contradicts" links two claim nodes
-// Proposed: add severity to contradiction edges
+function computeMateriality(contradiction: ContradictionEdge, schema: EvidenceSchema): number {
+  const categoryWeight = schema.weights[contradiction.evidence_category] ?? 0.5;
+  const exposure = normalizeExposure(contradiction.financial_exposure, scope.max_exposure);
+  const deps = contradiction.dependency_count / scope.max_dependency_count;
+  const urgency = contradiction.has_deadline ? 1.0 : 0.0;
+
+  return 0.4 * categoryWeight + 0.3 * exposure + 0.2 * deps + 0.1 * urgency;
+}
+```
+
+##### 5c. Mass computation
+
+```typescript
+// mass(U) = Σ severity_weight(e) × materiality(e) for e in unresolved contradictions
+const SEVERITY_WEIGHTS = { low: 0.1, medium: 0.3, high: 0.6, critical: 1.0 };
+
+function computeContradictionMass(unresolved: ContradictionEdge[], schema: EvidenceSchema): number {
+  return unresolved.reduce((sum, e) => {
+    const sw = SEVERITY_WEIGHTS[e.severity];
+    const m = computeMateriality(e, schema);
+    return sum + sw * m;
+  }, 0);
+}
+```
+
+##### 5d. Data model extension
+
+```typescript
 interface ContradictionEdge {
   type: "contradicts";
-  source_id: string;   // claim A
-  target_id: string;   // claim B
+  source_id: string;            // claim A
+  target_id: string;            // claim B
   severity: "low" | "medium" | "high" | "critical";
-  materiality: number; // domain-specific, e.g., financial amount at stake
+  evidence_category: string;    // links to evidence_schemas.yaml
+  financial_exposure?: number;  // domain-specific, optional
+  dependency_count: number;     // computed from semantic graph
+  has_deadline: boolean;        // from claim metadata
+  detected_at: string;          // ISO 8601
+  detected_by: string;          // agent ID
 }
-
-// mass(U) = Σ severity_weight(e) × materiality(e) for e in unresolved
 ```
 
-Severity weights: `{ low: 0.1, medium: 0.3, high: 0.6, critical: 1.0 }`.
-
-#### Issue 6: Evidence coverage is undefined
-
-**Problem:** The PRD lists "evidence coverage" as metric #1 but the codebase has no evidence coverage computation. There's no definition of "required evidence types" or "domain schema" for what constitutes complete evidence.
-
-This is arguably the biggest implementation gap: you can't compute evidence coverage without knowing what evidence is required.
-
-**Recommendation:** Implement evidence coverage as a **schema-driven checklist** per scope type:
+##### 5e. Finality gate integration
 
 ```yaml
-# evidence_schemas.yaml (new)
-schemas:
-  m_and_a_diligence:
-    required:
-      - financial_statements
-      - legal_contracts
-      - customer_data
-      - ip_portfolio
-      - regulatory_compliance
-    optional:
-      - market_analysis
-      - employee_data
-    weights:
-      financial_statements: 0.25
-      legal_contracts: 0.20
-      customer_data: 0.15
-      ip_portfolio: 0.15
-      regulatory_compliance: 0.15
-      market_analysis: 0.05
-      employee_data: 0.05
+# finality.yaml addition
+conditions:
+  contradiction_mass:
+    operator: "<="
+    threshold: 0.5      # max acceptable mass for RESOLVED
+    critical_threshold: 2.0  # above this → ESCALATED (mandatory human review)
 ```
 
-Coverage = weighted sum of present evidence types / total weight. This requires tagging context documents and claims with evidence types.
+The mass value feeds into Gate B (epistemic stability) alongside evidence coverage. The finality evaluator blocks RESOLVED status when `mass > threshold` and triggers ESCALATED when `mass > critical_threshold`.
 
-#### Issue 7: "Coordination signal" is novel but vague
+#### Issue 6: Evidence coverage is domain-dependent — cross-domain research
 
-**Problem:** Metric #6 "coordination health" is described as a proxy for repeated failure modes, misalignment, and low ToM. But:
-- What specific measurements compose it?
-- How do you detect "low ToM" in a running system?
-- Is this a single scalar or a vector?
+> **✅ Decided:** Revisited with 5-domain research. Universal 4-level hierarchy discovered.
 
-**Recommendation:** Define coordination signal as an observable **aggregate of failure patterns**:
+**Problem:** The PRD lists "evidence coverage" as metric #1 but the codebase has no evidence coverage computation. Evidence requirements are heavily domain-dependent.
+
+**Research:** Cross-domain analysis across 5 domains revealed a universal structural pattern despite domain-specific content.
+
+##### 6a. Universal 4-level hierarchy
+
+Every domain examined follows the same evidence structure:
+
+```
+Domain → Category → Item → Metadata
+```
+
+| Level | Description | Example (M&A) | Example (Clinical) |
+|-------|-------------|---------------|-------------------|
+| **Domain** | The top-level scope type | `m_and_a_diligence` | `clinical_trial_phase_iii` |
+| **Category** | A group of related evidence | `financial_statements` | `primary_endpoints` |
+| **Item** | A specific piece of evidence | `audited_annual_report_fy2025` | `efficacy_data_primary` |
+| **Metadata** | Properties of the item | `{ source, date, quality }` | `{ protocol, population, p_value }` |
+
+##### 6b. Cross-domain research findings (5 domains)
+
+| Domain | Categories | Hard Gates | Conditional Reqs | Dependencies |
+|--------|-----------|------------|------------------|-------------|
+| **M&A Due Diligence** | Financial, Legal, Commercial, IP, Regulatory, Tax, HR, Environmental | Audited financials, material contracts, compliance certificates | IP valuation needed only if tech company; environmental review only if manufacturing | Legal ← Financial (contracts reference financials) |
+| **Insurance Claims** | Policy verification, Loss documentation, Investigation, Coverage analysis, Liability, Reserves | Policy in force, proof of loss, insurable interest | Subrogation analysis only if third-party involvement; SIU referral only if fraud indicators | Coverage ← Policy verification; Reserves ← Investigation |
+| **Clinical Trials** | Regulatory compliance, Protocol adherence, Data integrity, Safety monitoring, Efficacy endpoints, Statistical analysis | IRB/Ethics approval, informed consent, SAE reporting | Adaptive design amendments only if interim futility; dose-escalation only in Phase I | Efficacy ← Protocol adherence ← Regulatory |
+| **Regulatory Compliance Audit** | Licensing, Reporting obligations, Internal controls, Risk management, Consumer protection, AML/KYC | Current license, SAR filing compliance, board risk oversight | Enhanced DD only if high-risk jurisdiction; stress testing only if systemic institution | Controls ← Risk mgmt ← Licensing |
+| **Litigation/Legal Case Preparation** | Pleadings, Discovery, Evidence authentication, Expert testimony, Procedural compliance | Standing, jurisdiction, statute of limitations | Class certification only if class action; Daubert challenge only if expert testimony | Expert ← Discovery ← Pleadings |
+
+##### 6c. Seven expressivity requirements
+
+Cross-domain analysis reveals 7 constructs that any evidence schema must support:
+
+| # | Requirement | Description | Found In |
+|---|------------|-------------|----------|
+| 1 | **Conditional requirements** | Evidence X is required only if condition Y holds | All 5 domains |
+| 2 | **Dependency DAG** | Evidence X cannot be assessed until evidence Y is present | All 5 domains |
+| 3 | **Hard gates** | Specific items that must be present for ANY finality (regardless of coverage score) | All 5 domains |
+| 4 | **Weighted scoring** | Categories have different importance weights | All 5 domains |
+| 5 | **Per-category completeness** | Each category has its own item checklist and threshold | 4 of 5 domains |
+| 6 | **Temporal constraints** | Some evidence has expiration dates or must be obtained within windows | 4 of 5 domains |
+| 7 | **Aggregation modes** | Some categories use quorum (M of N items sufficient), others use all-or-nothing | 3 of 5 domains |
+
+##### 6d. Proposed evidence schema format
+
+```yaml
+# evidence_schemas.yaml
+schemas:
+  m_and_a_diligence:
+    categories:
+      financial_statements:
+        weight: 0.25
+        completeness_threshold: 0.80
+        aggregation: "weighted"  # weighted | quorum | all_required
+        hard_gates:
+          - audited_annual_report     # must be present for ANY finality
+          - management_accounts
+        items:
+          - id: audited_annual_report
+            weight: 0.40
+            temporal_constraint: { max_age_days: 365 }
+          - id: management_accounts
+            weight: 0.30
+            temporal_constraint: { max_age_days: 90 }
+          - id: tax_returns
+            weight: 0.15
+          - id: cash_flow_projections
+            weight: 0.15
+
+      legal_contracts:
+        weight: 0.20
+        completeness_threshold: 0.75
+        aggregation: "quorum"    # 3 of 5 sufficient
+        quorum: { min: 3, of: 5 }
+        items:
+          - id: material_contracts
+            weight: 0.30
+          - id: customer_agreements
+            weight: 0.20
+          - id: supplier_agreements
+            weight: 0.20
+          - id: employment_contracts
+            weight: 0.15
+          - id: lease_agreements
+            weight: 0.15
+        conditions:
+          - item: ip_license_agreements
+            when: { scope_tag: "technology_company" }
+            weight: 0.25
+
+      regulatory_compliance:
+        weight: 0.15
+        completeness_threshold: 1.00  # all required — no partial credit
+        aggregation: "all_required"
+        hard_gates:
+          - compliance_certificates
+        items:
+          - id: compliance_certificates
+            weight: 0.50
+          - id: regulatory_filings
+            weight: 0.30
+          - id: pending_actions
+            weight: 0.20
+        conditions:
+          - item: environmental_review
+            when: { scope_tag: "manufacturing" }
+            weight: 0.30
+
+    dependencies:
+      # DAG: category A depends on category B
+      - from: legal_contracts
+        to: financial_statements
+        reason: "Contracts reference financial terms"
+      - from: ip_portfolio
+        to: legal_contracts
+        reason: "IP valuation requires license review"
+```
+
+##### 6e. Coverage computation algorithm
+
+```typescript
+interface CoverageResult {
+  total: number;              // [0, 1] overall weighted coverage
+  per_category: Record<string, number>;  // per-category scores
+  hard_gate_met: boolean;     // all hard gates satisfied?
+  unmet_hard_gates: string[]; // which hard gates are missing?
+  blocked_by_deps: string[];  // categories blocked by unmet dependencies
+  expired_items: string[];    // items past their temporal constraint
+}
+
+function computeEvidenceCoverage(
+  schema: DomainSchema,
+  present: Set<string>,       // item IDs present in context
+  scopeTags: Set<string>,     // scope tags for conditional requirements
+  now: Date
+): CoverageResult {
+  // 1. Resolve conditional requirements
+  const activeItems = resolveConditionals(schema, scopeTags);
+
+  // 2. Check dependency DAG — block categories with unmet dependencies
+  const blockedCategories = checkDependencyDAG(schema.dependencies, present);
+
+  // 3. Per-category completeness
+  const perCategory = {};
+  for (const [catId, cat] of Object.entries(activeItems)) {
+    if (blockedCategories.has(catId)) {
+      perCategory[catId] = 0;  // dependency not met
+      continue;
+    }
+    perCategory[catId] = computeCategoryScore(cat, present, now);
+  }
+
+  // 4. Check hard gates
+  const hardGates = collectHardGates(activeItems);
+  const unmetHardGates = hardGates.filter(g => !present.has(g));
+
+  // 5. Weighted total
+  const total = weightedSum(perCategory, schema.categories);
+
+  return {
+    total,
+    per_category: perCategory,
+    hard_gate_met: unmetHardGates.length === 0,
+    unmet_hard_gates: unmetHardGates,
+    blocked_by_deps: [...blockedCategories],
+    expired_items: findExpiredItems(activeItems, present, now),
+  };
+}
+```
+
+##### 6f. Integration with finality
+
+Evidence coverage feeds into Gate B (epistemic stability):
+
+```yaml
+# finality.yaml
+conditions:
+  evidence_coverage:
+    operator: ">="
+    threshold: 0.80          # minimum for RESOLVED
+    hard_gates_required: true # all hard gates must pass regardless of score
+```
+
+**Note on "Luego" and "Provingly":** Cross-domain research found no established evidence management frameworks under these names. The 4-level hierarchy and 7 expressivity requirements above are synthesized from domain-specific standards (AICPA DD guides, ISO 14971, Basel III/IV, FRCP) rather than any single existing tool.
+
+#### Issue 7: Coordination signal — agent-to-agent uncommitting exchange plane
+
+> **✅ Decided:** Redesigned as a full agent-to-agent uncommitting exchange plane, not just a failure-pattern aggregate.
+
+**Problem:** The original PRD described "coordination health" as a vague proxy. The stakeholder reframed this as: **"an agent-to-agent uncommitting plane to exchange information and signals."**
+
+**Resolution — Coordination Signal Architecture:**
+
+##### 7a. Design philosophy
+
+The coordination signal layer is an **uncommitting exchange plane** — agents publish soft signals that carry no governance weight. These signals are:
+- **Non-binding** — they don't trigger state transitions or governance rules
+- **Ephemeral** — they decay with TTL and are not part of the permanent audit trail
+- **Stigmergic** — agents observe the signal environment indirectly; no direct agent-to-agent messaging
+
+This is grounded in Wu & Ito (2025): implicit consensus through shared environment outperforms explicit consensus protocols. And Habiba et al. (2025): gossip-based dissemination with decay achieves faster convergence than flooding.
+
+##### 7b. Six signal types
+
+| Type | Semantics | Example | TTL |
+|------|----------|---------|-----|
+| `OBSERVATION` | "I noticed X" — factual, no judgment | "Document D contains financial data" | 5 rounds |
+| `CONFIDENCE` | "My confidence in claim C is X" | `{ claim_id, confidence: 0.82, basis: "3 sources" }` | 3 rounds |
+| `ATTENTION` | "Topic T needs examination" — soft priority signal | "IP licensing terms need review" | 5 rounds |
+| `INTENTION` | "I plan to do X next" — coordination without commitment | "Planning to extract facts from document D" | 2 rounds |
+| `CONCERN` | "I see a potential issue with X" — soft warning | "Risk score increasing in financial category" | 5 rounds |
+| `REQUEST` | "Can someone address X?" — non-binding request | "Need expertise on regulatory compliance" | 10 rounds |
+
+##### 7c. Signal data model
 
 ```typescript
 interface CoordinationSignal {
-  repeated_rejections: number;     // proposals rejected ≥2 times by same agent
-  conflicting_proposals: number;   // proposals that contradict a recent approval
-  stale_activations: number;       // agents activating on unchanged state
-  convergence_reversals: number;   // score direction changes in last τ rounds
-  agent_agreement_ratio: number;   // fraction of proposal pairs with consistent outcomes
+  signal_id: string;           // UUID
+  signal_type: SignalType;     // OBSERVATION | CONFIDENCE | ATTENTION | INTENTION | CONCERN | REQUEST
+  emitter_agent: string;       // agent ID
+  scope_id: string;            // scope context
+  epoch: number;               // round when emitted
+  payload: Record<string, any>; // type-specific structured data
+  ttl_rounds: number;          // rounds until decay
+  reinforcement_count: number; // how many agents echoed this signal
+  created_at: string;          // ISO 8601
 }
 ```
 
-This is measurable from existing data (context_events, proposal outcomes, convergence_history) without requiring ToM detection.
+##### 7d. Dual storage: NATS (hot) + PG (warm)
+
+| Layer | Technology | Purpose | Retention |
+|-------|-----------|---------|-----------|
+| **Hot** | NATS subject `swarm.signals.{scope_id}` | Real-time dissemination to active agents | In-memory, stream with `max_age: 1h` |
+| **Warm** | PostgreSQL `coordination_signals` table | Query for aggregation, pattern detection, coordination health | 24h rolling window |
+
+Agents subscribe to the NATS signal subject alongside their normal event subjects. Signals are published with `AckPolicy.None` (fire-and-forget — uncommitting).
+
+##### 7e. Signal reinforcement (stigmergy)
+
+When an agent observes a signal that aligns with its own analysis, it can **reinforce** it by publishing a reinforcement event. This increments the `reinforcement_count` on the original signal.
+
+Reinforcement mechanics:
+- A signal with `reinforcement_count >= 3` is a **strong signal** — multiple agents independently agree
+- Strong CONCERN signals elevate the scope's risk profile (soft, not governance-binding)
+- Strong ATTENTION signals influence pressure-directed activation (which agent activates next)
+- Reinforcement does NOT create governance obligations — it's purely informational
+
+##### 7f. Coordination health metric (composite scalar)
+
+The coordination signal layer produces a single `coordination_health` scalar in `[0, 1]` that feeds into the finality evaluator:
+
+```typescript
+function computeCoordinationHealth(signals: CoordinationSignal[], epoch: number): number {
+  const active = signals.filter(s => epoch - s.epoch <= s.ttl_rounds);
+
+  // Component 1: Signal diversity — are different signal types being emitted?
+  const typesCovered = new Set(active.map(s => s.signal_type)).size;
+  const diversity = typesCovered / 6;  // 6 signal types
+
+  // Component 2: Reinforcement ratio — are agents agreeing with each other?
+  const reinforced = active.filter(s => s.reinforcement_count >= 2);
+  const reinforcementRatio = active.length > 0 ? reinforced.length / active.length : 0;
+
+  // Component 3: Concern ratio (inverted) — fewer concerns = healthier coordination
+  const concerns = active.filter(s => s.signal_type === 'CONCERN');
+  const concernRatio = 1 - Math.min(concerns.length / Math.max(active.length, 1), 1);
+
+  // Component 4: Intention fulfillment — did agents follow through on stated intentions?
+  const intentions = active.filter(s => s.signal_type === 'INTENTION');
+  const fulfilled = intentions.filter(s => intentionFulfilled(s, epoch));
+  const fulfillmentRatio = intentions.length > 0 ? fulfilled.length / intentions.length : 1;
+
+  // Weighted composite
+  return 0.20 * diversity
+       + 0.30 * reinforcementRatio
+       + 0.25 * concernRatio
+       + 0.25 * fulfillmentRatio;
+}
+```
+
+##### 7g. Integration with finality
+
+```yaml
+# finality.yaml addition
+conditions:
+  coordination_health:
+    operator: ">="
+    threshold: 0.50   # minimum for RESOLVED — agents must show basic coordination
+```
+
+Low coordination health doesn't block finality by itself — it contributes to the overall goal score as a dimension. Very low coordination health (< 0.3) triggers a CONCERN-level flag that influences HITL routing.
 
 #### Issue 8: Protocol switching needs trigger definitions
 
-**Problem:** The PRD describes three protocols (evidence-first, debate-lite, diversity+confidence) but doesn't define:
-- What triggers a switch from one to another?
-- Can protocols be used per-scope or only globally?
-- How does the system detect that the current protocol is failing?
+> **✅ Decided:** YAML switch rules first. More interesting models (learned switching, RL-based) to explore later.
 
-**Recommendation:** Define explicit switching triggers in `finality.yaml`:
+**Problem:** The PRD describes three protocols (evidence-first, debate-lite, diversity+confidence) but doesn't define trigger conditions.
+
+**Resolution:** Protocol switching is configured via YAML in `finality.yaml`. Switch rules are evaluated per-scope at each epoch boundary. The protocol engine checks conditions and transitions if matched.
 
 ```yaml
 protocols:
   default: evidence_first
+  scope: per_scope              # each scope can run a different protocol
   switch_rules:
     - from: evidence_first
       to: debate_lite
@@ -337,14 +662,30 @@ protocols:
         oscillation_detected: true
 ```
 
+**Future exploration:** The YAML switch rules are a starting point. More expressive models to investigate:
+- **Learned switching:** Train a classifier on historical (protocol, outcome) data to predict optimal protocol
+- **RL-based:** Treat protocol selection as a bandit problem with convergence speed as reward
+- **Bayesian:** Maintain posterior beliefs about protocol effectiveness per domain type
+- **Hybrid:** Use YAML rules as constraints and RL within the feasible set
+
+These are Phase 5+ concerns. YAML rules are sufficient for initial deployment.
+
 #### Issue 9: Integration with governance PRD needs alignment
 
-**Problem:** The Finality PRD references XACML obligations for human routing and OPA monotonicity gates. The governance PRD (reviewed separately) recommends against XACML as a runtime engine and proposes OPA-WASM instead.
+> **✅ Decided:** OPA-WASM confirmed. Both PRDs now aligned.
 
-**Recommendation:** Align the two PRDs:
-- **HITL routing obligations** → implement via the custom obligation enforcer from the governance design (not raw XACML)
-- **OPA monotonicity gates** → implement as Rego policies in the governance OPA bundle (Phase 1 of governance plan)
-- **OpenFGA reviewer assignment** → extend the OpenFGA model with `reviewer` relation (governance Phase 0)
+**Problem:** The Finality PRD referenced XACML obligations and OPA monotonicity gates without knowing which engine the governance layer would use.
+
+**Resolution:** Both PRDs are now aligned on the same engine stack:
+
+| Component | Engine | Integration Point |
+|-----------|--------|------------------|
+| HITL routing obligations | Custom obligation enforcer (TypeScript) from governance design | `evaluateFinality() → HITL` triggers `require_human_review` obligation |
+| Monotonicity gates | OPA Rego policies via OPA-WASM | `policies/swarm/governance/monotonicity.rego` gates proposals when goal score is non-monotonic |
+| Gate A authorization | OPA Rego policies via OPA-WASM | `policies/swarm/governance/gate_a.rego` checks MITL pending, FGA denials |
+| Reviewer assignment | OpenFGA `reviewer` relation | Governance Phase 0 extends FGA model |
+
+No XACML anywhere in the stack.
 
 #### Issue 10: "Finality certificate" needs format and signing specification
 
@@ -387,15 +728,15 @@ interface FinalityCertificatePayload {
 
 ## 5. Open Questions
 
-| # | Question | Impact |
-|---|----------|--------|
-| Q1 | Should sessions be a new entity, or should we extend the existing scope model? | Determines whether we add `sessions` table or add columns to `swarm_state` |
-| Q2 | How are contradiction severity/materiality assigned? (Agent-determined? Schema-driven? Domain-expert-labeled?) | Affects the `mass(U)` computation and the data model for contradiction edges |
-| Q3 | What evidence schemas exist per domain? (M&A diligence, insurance claim, sales pipeline) | Blocks evidence coverage implementation — can't compute without a schema |
-| Q4 | Is protocol switching per-scope or per-session? Can different scopes within a session use different protocols? | Affects the protocol state machine granularity |
-| Q5 | How is the governance PRD's timeline aligned with this one? (OPA integration must precede OPA monotonicity gates) | Sequencing dependency between the two PRDs |
-| Q6 | What signing keys are used for finality certificates? Per-agent keys? Per-system keys? HSM-managed? | Affects key management architecture |
-| Q7 | Should we track semantic diversity (embedding-space dimensionality) as a convergence metric? (Paper 2 evidence) | Adds ML pipeline dependency for embedding computation |
+| # | Question | Impact | Status |
+|---|----------|--------|--------|
+| Q1 | Should sessions be a new entity, or should we extend the existing scope model? | Determines whether we add `sessions` table or add columns to `swarm_state` | **✅ Decided:** scope_id = session, epoch = round. No new entities. |
+| Q2 | How are contradiction severity/materiality assigned? | Affects the `mass(U)` computation and the data model for contradiction edges | **✅ Decided:** Full model in Issue 5. Facts agent proposes severity; governance can override. Materiality from evidence schema + exposure + dependencies. |
+| Q3 | What evidence schemas exist per domain? | Blocks evidence coverage implementation — can't compute without a schema | **✅ Decided:** 5-domain research complete. Universal 4-level hierarchy. Schema format defined in Issue 6. Start with M&A domain. |
+| Q4 | Is protocol switching per-scope or per-session? | Affects the protocol state machine granularity | **✅ Decided:** Per-scope. Each scope can run a different protocol. YAML switch rules. |
+| Q5 | How is the governance PRD's timeline aligned with this one? | Sequencing dependency between the two PRDs | **✅ Decided:** OPA-WASM in both. Finality Phases 0–4 are independent; Phase 5–6 may depend on governance Phase 1. |
+| Q6 | What signing keys are used for finality certificates? | Affects key management architecture | Open — start with single system key (Ed25519); defer multi-agent key infrastructure. |
+| Q7 | Should we track semantic diversity (embedding-space dimensionality)? | Adds ML pipeline dependency for embedding computation | Open — deferred. Coordination signal layer covers diversity measurement without embeddings. |
 
 ---
 
@@ -415,46 +756,51 @@ Everything in the current convergence layer is architecturally sound and well-te
 ### What to add
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                  FINALITY EVALUATION (revised)                │
-│                                                               │
-│  Gate A: ─── PRECONDITION (governance layer, not finality) ── │
-│                                                               │
-│  Gate B: Epistemic stability                                  │
-│    ├─ contradiction_mass(U) with severity weighting  [NEW]    │
-│    ├─ evidence_coverage via domain schema            [NEW]    │
-│    └─ unresolved_count (existing)                             │
-│                                                               │
-│  Gate C: Progress stability                                   │
-│    ├─ Lyapunov V, α rate, β monotonicity, τ plateau (existing)│
-│    ├─ oscillation pattern detection (autocorrelation) [NEW]   │
-│    ├─ trajectory quality score                        [NEW]   │
-│    └─ confidence calibration (per-agent)              [NEW]   │
-│                                                               │
-│  Gate D: Operational quiescence                               │
-│    ├─ idle_cycles >= threshold (existing condition)            │
-│    ├─ activation_pressure == 0                        [NEW]   │
-│    └─ no admissible proposals (heuristic)             [NEW]   │
-│                                                               │
-│  Protocol engine                                              │
-│    ├─ evidence_first (default)                        [NEW]   │
-│    ├─ debate_lite (plateau + low risk)                [NEW]   │
-│    ├─ diversity_confidence (plateau + high risk)      [NEW]   │
-│    └─ judge_adjudication (deadlock fallback)          [NEW]   │
-│                                                               │
-│  Session lifecycle                                            │
-│    ├─ session_started / session_finalized events       [NEW]  │
-│    └─ round metrics snapshots                          [NEW]  │
-│                                                               │
-│  Finality certificate                                         │
-│    ├─ JWS General JSON with multi-signature            [NEW]  │
-│    └─ policy version hashes                            [NEW]  │
-│                                                               │
-│  Coordination signal                                          │
-│    ├─ repeated_rejections, conflicting_proposals       [NEW]  │
-│    └─ agent_agreement_ratio, convergence_reversals     [NEW]  │
-│                                                               │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                  FINALITY EVALUATION (revised)                    │
+│                                                                   │
+│  Gate A: ─── PRECONDITION (governance layer) ──────────────────  │
+│    └─ evaluateGateA() via OPA-WASM (see governance-design.md)    │
+│                                                                   │
+│  Gate B: Epistemic stability                                      │
+│    ├─ contradiction_mass(U) with severity/materiality    [NEW]    │
+│    ├─ evidence_coverage via domain schema (4-level)      [NEW]    │
+│    ├─ hard gate check (must-have evidence items)         [NEW]    │
+│    └─ unresolved_count (existing)                                 │
+│                                                                   │
+│  Gate C: Progress stability                                       │
+│    ├─ Lyapunov V, α rate, β monotonicity, τ plateau (existing)   │
+│    ├─ oscillation pattern detection (autocorrelation)    [NEW]    │
+│    ├─ trajectory quality score                           [NEW]    │
+│    └─ confidence calibration (per-agent)                 [NEW]    │
+│                                                                   │
+│  Gate D: Operational quiescence (time-bounded heuristic)          │
+│    ├─ idle_cycles >= threshold (existing condition)                │
+│    ├─ activation_pressure_total == 0                     [NEW]    │
+│    └─ last_delta_age_ms >= quiescence_window             [NEW]    │
+│                                                                   │
+│  Protocol engine (YAML switch rules)                              │
+│    ├─ evidence_first (default)                           [NEW]    │
+│    ├─ debate_lite (plateau + low risk)                   [NEW]    │
+│    ├─ diversity_confidence (plateau + high risk)         [NEW]    │
+│    └─ judge_adjudication (deadlock fallback)             [NEW]    │
+│                                                                   │
+│  Session lifecycle (scope_id = session, epoch = round)            │
+│    ├─ session_started / session_finalized events          [NEW]   │
+│    └─ round metrics snapshots per epoch                   [NEW]   │
+│                                                                   │
+│  Finality certificate                                             │
+│    ├─ JWS General JSON with multi-signature               [NEW]   │
+│    └─ policy version hashes                               [NEW]   │
+│                                                                   │
+│  Coordination signal layer (uncommitting exchange plane)          │
+│    ├─ 6 signal types: OBSERVATION, CONFIDENCE, ATTENTION,        │
+│    │  INTENTION, CONCERN, REQUEST                         [NEW]   │
+│    ├─ Dual NATS (hot) + PG (warm) storage                [NEW]   │
+│    ├─ Stigmergic reinforcement with TTL decay            [NEW]   │
+│    └─ coordination_health composite scalar → Gate B/C    [NEW]   │
+│                                                                   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Metrics additions to `FinalitySnapshot`
@@ -464,19 +810,25 @@ Everything in the current convergence layer is architecturally sound and well-te
 interface FinalitySnapshot {
   // ... existing fields ...
 
-  // NEW: Gate B
-  contradiction_mass: number;               // severity-weighted sum
-  evidence_coverage: number;                // [0-1] per domain schema
+  // NEW: Gate B — Epistemic stability
+  contradiction_mass: number;               // severity × materiality weighted sum
+  evidence_coverage: CoverageResult;        // per-domain schema (see Issue 6)
+  hard_gates_met: boolean;                  // all must-have evidence items present
 
-  // NEW: Gate D
-  activation_pressure_total: number;        // sum of all dimension pressures
-  pending_admissible_count: number;         // heuristic from idle + pressure
-
-  // NEW: Coordination signal
-  coordination_signal: CoordinationSignal;
-
-  // NEW: Confidence
+  // NEW: Gate C — Progress stability (extend convergence)
+  oscillation_period: number | null;        // detected cycle length, or null
+  trajectory_quality: number;               // [0-1] shape quality score
   agent_confidence_spread: number;          // std dev of per-agent confidences
+
+  // NEW: Gate D — Quiescence
+  activation_pressure_total: number;        // sum of all dimension pressures
+  last_delta_age_ms: number;               // wall-clock ms since last state change
+  quiescent: boolean;                       // composite heuristic
+
+  // NEW: Coordination signal layer
+  coordination_health: number;              // [0-1] composite scalar
+  active_signals_count: number;             // non-expired signals in scope
+  strong_concerns_count: number;            // CONCERN signals with reinforcement >= 3
 }
 ```
 
@@ -493,7 +845,7 @@ interface FinalitySnapshot {
 | 0.1 | **Extend `FinalitySnapshot`** — add `contradiction_mass`, `evidence_coverage`, `activation_pressure_total`, `coordination_signal` fields | `src/finalityEvaluator.ts` |
 | 0.2 | **Add contradiction severity to semantic graph** — `severity` column on contradiction edges, migration script | `src/semanticGraph.ts`, DB migration |
 | 0.3 | **Create `evidence_schemas.yaml`** — domain evidence checklists (start with one domain, e.g., M&A diligence) | `evidence_schemas.yaml` |
-| 0.4 | **Define `CoordinationSignal` type** — repeated rejections, conflicting proposals, stale activations, convergence reversals, agreement ratio | `src/types/finality.ts` |
+| 0.4 | **Define `CoordinationSignal` type** — 6 signal types (OBSERVATION, CONFIDENCE, ATTENTION, INTENTION, CONCERN, REQUEST), reinforcement model, TTL decay | `src/types/finality.ts` |
 | 0.5 | **Define `FinalityCertificatePayload` type** — scope, score, trajectory hash, unresolved set, policy versions | `src/types/finality.ts` |
 | 0.6 | **Define `DeliberationProtocol` type** — protocol ID, switch rules, per-scope assignment | `src/types/finality.ts` |
 | 0.7 | **Install `jose`** — JWS signing for finality certificates | `package.json` |
@@ -526,9 +878,13 @@ interface FinalitySnapshot {
 | 2.3 | **Add confidence spread tracking** — compute std dev of per-agent confidence values; high spread = disagreement | `src/convergenceTracker.ts` |
 | 2.4 | **Extend `analyzeConvergence()`** — return `oscillation_period`, `trajectory_quality`, `confidence_spread` alongside existing fields | `src/convergenceTracker.ts` |
 | 2.5 | **Update finality evaluation** — trajectory quality gates RESOLVED (trajectory_quality >= 0.7 required alongside monotonicity) | `src/finalityEvaluator.ts` |
-| 2.6 | **Coordination signal computation** — count repeated rejections, conflicting proposals, stale activations from `context_events` | `src/coordinationSignal.ts` (new) |
-| 2.7 | **Integrate coordination signal into snapshot** | `src/finalityEvaluator.ts` |
-| 2.8 | **Tests** — oscillation autocorrelation, trajectory scoring, coordination signal | `test/unit/convergenceTracker.test.ts` |
+| 2.6 | **Implement coordination signal storage** — NATS subject `swarm.signals.{scope_id}` (hot, `AckPolicy.None`) + PG `coordination_signals` table (warm, 24h rolling) | `src/coordinationSignal.ts` (new), `src/eventBus.ts` |
+| 2.7 | **Implement signal emission API** — `emitSignal(type, payload, ttl)` called by agents; publish to NATS + insert PG | `src/coordinationSignal.ts` |
+| 2.8 | **Implement signal reinforcement** — `reinforceSignal(signal_id)` increments count; strong signals (count >= 3) marked for attention | `src/coordinationSignal.ts` |
+| 2.9 | **Implement `computeCoordinationHealth()`** — composite scalar from diversity, reinforcement ratio, concern ratio, intention fulfillment | `src/coordinationSignal.ts` |
+| 2.10 | **Integrate coordination health into snapshot** — add to `loadFinalitySnapshot()` as a dimension | `src/finalityEvaluator.ts` |
+| 2.11 | **Wire signal subscription into agents** — agents subscribe to `swarm.signals.{scope_id}` alongside normal subjects; signals inform but don't bind | `src/agentLoop.ts` |
+| 2.12 | **Tests** — signal emission, reinforcement, TTL decay, coordination health, oscillation autocorrelation, trajectory scoring | `test/unit/coordinationSignal.test.ts`, `test/unit/convergenceTracker.test.ts` |
 
 ### Phase 3: Gate D + Session Lifecycle (est. 1–2 weeks)
 
@@ -540,8 +896,9 @@ interface FinalitySnapshot {
 | 3.2 | **Add quiescence to finality.yaml** — new RESOLVED condition: `quiescence: true` (alongside existing conditions) | `finality.yaml` |
 | 3.3 | **Formalize session lifecycle** — add `session_started` and `session_finalized` event types to context WAL | `src/contextWal.ts` |
 | 3.4 | **Round metrics snapshots** — after each epoch, emit `RoundEvent` with full metrics snapshot to context WAL | `src/agents/governanceAgent.ts` |
-| 3.5 | **Session table** (optional) — `sessions(session_id, scope_id, started_at, finalized_at, finality_state, certificate_id)` | DB migration |
-| 3.6 | **Tests** — quiescence detection, session lifecycle events | `test/unit/finalityEvaluator.test.ts` |
+| 3.5 | **Tests** — quiescence detection, session lifecycle events, round metrics snapshots | `test/unit/finalityEvaluator.test.ts` |
+
+*Note: No `sessions` table needed — `scope_id` is the session, `epoch` is the round. Session lifecycle is expressed through WAL event types.*
 
 ### Phase 4: Finality Certificates (est. 1 week)
 
@@ -646,9 +1003,11 @@ interface FinalitySnapshot {
 |-------|--------|---------|
 | `convergence_history` | Existing | Convergence points per scope/epoch |
 | `scope_finality_decisions` | Existing | Human finality decisions |
-| `context_events` | Existing | Append-only audit WAL |
+| `context_events` | Existing | Append-only audit WAL (also serves as session lifecycle via event types) |
 | `mitl_pending` | Existing | Human review queue |
-| `swarm_state` | Existing | State machine (scope, epoch) |
-| `finality_certificates` | **New** | Signed finality artifacts |
-| `sessions` | **New (optional)** | Session lifecycle tracking |
+| `swarm_state` | Existing | State machine (scope_id = session, epoch = round) |
+| `coordination_signals` | **New (Phase 2)** | Agent-to-agent uncommitting signals, 24h rolling window |
+| `finality_certificates` | **New (Phase 4)** | Signed finality artifacts (JWS General JSON) |
 | `agent_reputation` | **New (Phase 6)** | Per-agent track record |
+
+*Note: No `sessions` table — scope_id is the session. No new entity needed.*
