@@ -3,6 +3,7 @@
 **Branch:** `feature/governance-design`
 **Status:** Architecture Review — NOT YET IMPLEMENTING
 **Date:** 2026-02-22
+**Last updated:** 2026-02-22 — Incorporated user decisions: OPA-WASM confirmed, Gate A moved here from finality PRD
 
 ---
 
@@ -14,9 +15,10 @@
 4. [Open Questions](#4-open-questions)
 5. [Technology Assessment](#5-technology-assessment)
 6. [Revised Architecture Recommendation](#6-revised-architecture-recommendation)
-7. [High-Level Implementation Plan](#7-high-level-implementation-plan)
-8. [Risk Register](#8-risk-register)
-9. [Resources & References](#9-resources--references)
+7. [Gate A — Authorization Stability as Governance Precondition](#7-gate-a--authorization-stability-as-governance-precondition)
+8. [High-Level Implementation Plan](#8-high-level-implementation-plan)
+9. [Risk Register](#9-risk-register)
+10. [Resources & References](#10-resources--references)
 
 ---
 
@@ -196,14 +198,14 @@ This collapses OPA + XACML into one engine that can run in-process or as a singl
 
 ## 4. Open Questions
 
-| # | Question | Impact | Options |
-|---|----------|--------|---------|
-| Q1 | Should we target XACML compliance for regulatory reasons, or is the conceptual model sufficient? | If regulation requires XACML audit artifacts, we need AuthZForce. If not, native TS is simpler. | A) Full XACML compliance via AuthZForce sidecar. B) XACML-inspired native TS engine. |
-| Q2 | How critical is formal verification (SMT proofs) for governance policies? | Cedar offers provable safety properties. If needed for compliance, it changes the engine choice. | A) Required — use Cedar. B) Nice-to-have — use test suites instead. |
-| Q3 | Will business users (non-engineers) author governance policies directly? | If yes, a custom DSL with IDE support (Langium) is justified. If no, YAML is sufficient. | A) Yes — build DSL with LSP. B) No — enhanced YAML with Zod validation. |
-| Q4 | What is the expected policy volume? (10 rules? 100? 1000?) | Affects engine choice. <100 rules → any engine works. >100 → need rule indexing (OPA, Cedar). | Estimate from domain requirements. |
-| Q5 | Is OPA's uncertain stewardship (Styra → Apple acquisition, 2025) acceptable? | OPA is CNCF graduated but lost its primary commercial backer. | A) Accept the risk — CNCF governance is sufficient. B) Prefer Cedar/Cerbos (stronger backing). |
-| Q6 | How should agent reputation be computed and decayed? | Directly affects L2 admissibility rules. | Define signals, decay function, storage. |
+| # | Question | Impact | Status |
+|---|----------|--------|--------|
+| Q1 | Should we target XACML compliance for regulatory reasons, or is the conceptual model sufficient? | If regulation requires XACML audit artifacts, we need AuthZForce. If not, native TS is simpler. | **Decided:** XACML-inspired native TS engine. No XACML runtime. |
+| Q2 | How critical is formal verification (SMT proofs) for governance policies? | Cedar offers provable safety properties. If needed for compliance, it changes the engine choice. | Open — deferred. Test suites first; Cedar can be added later if needed. |
+| Q3 | Will business users (non-engineers) author governance policies directly? | If yes, a custom DSL with IDE support (Langium) is justified. If no, YAML is sufficient. | **Decided:** YAML first. DSL deferred to Phase 3 if needed. |
+| Q4 | What is the expected policy volume? (10 rules? 100? 1000?) | Affects engine choice. <100 rules → any engine works. >100 → need rule indexing (OPA, Cedar). | Open — estimate from domain requirements. |
+| Q5 | Is OPA's uncertain stewardship (Styra → Apple acquisition, 2025) acceptable? | OPA is CNCF graduated but lost its primary commercial backer. | **Decided:** Accept the risk. OPA-WASM is the chosen engine. CNCF governance is sufficient. Cerbos remains viable fallback. |
+| Q6 | How should agent reputation be computed and decayed? | Directly affects L2 admissibility rules. | Open — deferred to Phase 4. Define signals, decay function, storage. |
 
 ---
 
@@ -362,7 +364,9 @@ Proposal → │ L1: OpenFGA        → Authorized?                 │
 
 4. **DSL is a Phase 3 concern** — start with YAML/Rego policies, build DSL only when business users need direct authoring.
 
-### Recommended engine: **Option A (OPA-WASM) + Custom obligation layer**
+### ✅ Decided engine: **Option A (OPA-WASM) + Custom obligation layer**
+
+*Decision confirmed by stakeholder review. OPA-WASM is the chosen engine.*
 
 **Rationale:**
 - OPA-WASM gives sub-ms in-process evaluation with zero external dependencies at runtime
@@ -380,7 +384,151 @@ Proposal → │ L1: OpenFGA        → Authorized?                 │
 
 ---
 
-## 7. High-Level Implementation Plan
+## 7. Gate A — Authorization Stability as Governance Precondition
+
+> **Decision:** Gate A (authorization stability) belongs in the governance layer, not the finality layer. The finality PRD originally defined four gates (A–D). After review, Gate A was moved here because it checks authorization state — the domain of the governance pipeline. The finality evaluator handles Gates B (epistemic), C (progress), and D (quiescence).
+
+### 7.1 What is Gate A?
+
+Gate A checks: **"Are there pending high-impact actions that remain blocked by missing permissions or approvals?"**
+
+If authorization blockers exist, the deliberation is not ready for finality evaluation. Gate A is a **precondition** — it must pass before the finality evaluator (Gates B, C, D) runs.
+
+### 7.2 Authorization stability conditions
+
+| Condition | Source | Check |
+|-----------|--------|-------|
+| No blocked high-impact proposals | `mitl_pending` table | `SELECT count(*) FROM mitl_pending WHERE scope_id = $1 AND status = 'pending' AND impact = 'high'` → must be 0 |
+| No unresolved FGA denials | OpenFGA + proposal log | Recent proposals denied by FGA that haven't been re-submitted with corrected permissions |
+| All escalations routed | `context_events` WAL | Escalation events have corresponding reviewer assignment events |
+| Reviewer assignments complete | OpenFGA model | Every required `reviewer` relation for the scope is populated |
+
+### 7.3 Implementation in the governance pipeline
+
+Gate A integrates into the existing governance evaluation flow:
+
+```
+Proposal arrives via NATS (swarm.proposals.>)
+  │
+  ├─ MASTER mode → auto-approve
+  ├─ MITL mode → always pending (human required)
+  └─ YOLO mode →
+       │
+       ├─ evaluateProposalDeterministic()
+       │    ├─ Check epoch match
+       │    ├─ Evaluate drift rules (governance.yaml)
+       │    ├─ Check transition rules (canTransition)
+       │    └─ Check OpenFGA policy (checkPermission)
+       │
+       ├─ ★ NEW: evaluateGateA(scopeId)                    ← Added
+       │    ├─ Check pending MITL high-impact count
+       │    ├─ Check unresolved FGA denials
+       │    ├─ Check escalation routing completeness
+       │    └─ Return { stable: boolean, blockers: [] }
+       │
+       ├─ runOversightAgent() [optional LLM triage]
+       └─ processProposalWithAgent() [full LLM governance]
+```
+
+When Gate A reports `stable: false`, the governance agent:
+1. Does **not** block the current proposal (that's the other rules' job)
+2. Publishes a `gate_a_unstable` event to the WAL with the blocker list
+3. The finality evaluator reads this flag and **skips finality evaluation** while Gate A is unstable
+4. Obligation `require_authorization_clearance` can be triggered to route blockers to humans
+
+### 7.4 Gate A as an OPA policy
+
+Gate A rules will be expressed as Rego policies in the OPA-WASM bundle:
+
+```rego
+package swarm.governance.gate_a
+
+import rego.v1
+
+# Gate A: authorization stability precondition
+gate_a_stable if {
+    count(pending_high_impact_mitl) == 0
+    count(unresolved_fga_denials) == 0
+    all_escalations_routed
+}
+
+pending_high_impact_mitl contains item if {
+    some item in input.mitl_pending
+    item.impact == "high"
+    item.status == "pending"
+}
+
+unresolved_fga_denials contains denial if {
+    some denial in input.recent_fga_denials
+    not denial.resubmitted
+    not denial.waived
+}
+
+all_escalations_routed if {
+    every esc in input.escalations {
+        esc.reviewer_assigned == true
+    }
+}
+
+# Blockers for HITL routing
+blockers[msg] if {
+    count(pending_high_impact_mitl) > 0
+    msg := sprintf("%d high-impact proposals pending human approval", [count(pending_high_impact_mitl)])
+}
+
+blockers[msg] if {
+    some denial in unresolved_fga_denials
+    msg := sprintf("FGA denial for %s on %s — needs permission grant or waiver", [denial.agent, denial.action])
+}
+
+blockers[msg] if {
+    some esc in input.escalations
+    not esc.reviewer_assigned
+    msg := sprintf("Escalation %s has no reviewer assigned", [esc.id])
+}
+```
+
+### 7.5 Gate A in the enrichment pipeline
+
+The enrichment service (Phase 1 of the implementation plan) must collect Gate A inputs:
+
+| Input | Source | Collection |
+|-------|--------|------------|
+| `mitl_pending` | PostgreSQL `mitl_pending` table | Query at evaluation time |
+| `recent_fga_denials` | Context events WAL (type = `proposal_rejected`, reason = `fga_denied`) | Scan last N events for scope |
+| `escalations` | Context events WAL (type = `escalation_created`) + OpenFGA (`reviewer` relation) | Join events with FGA model |
+
+### 7.6 Relationship to finality evaluator
+
+```
+                    GOVERNANCE LAYER                    FINALITY LAYER
+                    ───────────────                    ──────────────
+
+Proposal ──→ [FGA] ──→ [OPA L2] ──→ [Gate A check] ──→ ...
+                                         │
+                                         ├─ stable → finality evaluator runs Gates B,C,D
+                                         └─ unstable → finality skipped, blockers logged
+```
+
+The finality evaluator (`evaluateFinality()`) adds a **precondition check**:
+
+```typescript
+// In evaluateFinality():
+const gateA = await loadGateAStatus(scopeId);
+if (!gateA.stable) {
+  // Do not evaluate finality — authorization blockers exist
+  return {
+    status: null,  // ACTIVE — keep processing
+    reason: 'gate_a_unstable',
+    blockers: gateA.blockers,
+  };
+}
+// Proceed with Gates B, C, D...
+```
+
+---
+
+## 8. High-Level Implementation Plan
 
 ### Phase 0: Foundation (est. 1 week)
 
@@ -395,7 +543,8 @@ Proposal → │ L1: OpenFGA        → Authorized?                 │
 | 0.5 | **Define `PolicyDecision` type** — `{ decision, obligations[], advice[], reasons[], policyVersions }` | `src/types/governance.ts` |
 | 0.6 | **Define `DecisionRecord` type** — Full audit record per PRD Section 8 | `src/types/governance.ts` |
 | 0.7 | **Create `src/obligationEnforcer.ts`** — Registry of obligation handlers, enforcement with failure semantics | `src/obligationEnforcer.ts` |
-| 0.8 | **Expand OpenFGA model** — Add policy modification rights, scope ownership, escalation authority | `openfga/model.fga` |
+| 0.8 | **Expand OpenFGA model** — Add policy modification rights, scope ownership, escalation authority, reviewer assignment | `openfga/model.fga` |
+| 0.9 | **Define Gate A types** — `GateAStatus { stable: boolean, blockers: string[] }`, enrichment inputs | `src/types/governance.ts` |
 
 ### Phase 1: OPA Integration — Contextual Admissibility (est. 2 weeks)
 
@@ -414,7 +563,11 @@ Proposal → │ L1: OpenFGA        → Authorized?                 │
 | 1.9 | **Wire into governance agent** — Replace `evaluateProposalDeterministic()` internals with `policyEngine.evaluate()` + `obligationEnforcer.enforce()` | `src/agents/governanceAgent.ts` |
 | 1.10 | **Write Rego tests** — `opa test` covering all current `test/unit/governance.test.ts` scenarios + new rules | `policies/swarm/governance/*_test.rego` |
 | 1.11 | **Write TypeScript integration tests** — End-to-end: proposal → OPA eval → obligation enforcement → decision record | `test/unit/policyEngine.test.ts` |
-| 1.12 | **Shadow mode** — Run OPA in parallel with current governance.ts, log discrepancies, don't use OPA result for decisions yet | `src/agents/governanceAgent.ts` |
+| 1.12 | **Implement Gate A Rego policies** — `policies/swarm/governance/gate_a.rego` with stability checks for MITL pending, FGA denials, escalation routing | `policies/swarm/governance/gate_a.rego` |
+| 1.13 | **Implement `evaluateGateA()`** — Query MITL pending, recent FGA denials, escalation status; evaluate via OPA-WASM; return `GateAStatus` | `src/gateA.ts` (new) |
+| 1.14 | **Wire Gate A into governance agent** — Call `evaluateGateA()` after deterministic evaluation; publish `gate_a_unstable` events to WAL | `src/agents/governanceAgent.ts` |
+| 1.15 | **Wire Gate A precondition into finality evaluator** — `evaluateFinality()` checks Gate A status before proceeding to Gates B, C, D | `src/finalityEvaluator.ts` |
+| 1.16 | **Shadow mode** — Run OPA in parallel with current governance.ts, log discrepancies, don't use OPA result for decisions yet | `src/agents/governanceAgent.ts` |
 
 ### Phase 2: Obligation Model + Combining Algorithms (est. 2 weeks)
 
@@ -458,7 +611,7 @@ Proposal → │ L1: OpenFGA        → Authorized?                 │
 
 ---
 
-## 8. Risk Register
+## 9. Risk Register
 
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|------|-----------|--------|------------|
@@ -470,10 +623,12 @@ Proposal → │ L1: OpenFGA        → Authorized?                 │
 | R6 | Policy engine abstraction leaks OPA-specific concepts | Medium | Medium | Keep `PolicyEngine` interface generic; test with mock engine |
 | R7 | Combining algorithm edge cases (NotApplicable, Indeterminate) | Medium | High | Comprehensive test suite for each algorithm; XACML spec is unambiguous on these cases |
 | R8 | Bundle deployment lag causes inconsistent policy evaluation across agents | Low | Medium | Pin bundle revision in decision record; detect version skew via OTEL metrics |
+| R9 | Gate A creates coupling between governance and finality layers | Medium | Medium | Gate A is a read-only precondition check — finality evaluator queries Gate A status but doesn't execute governance logic. Clean interface via `GateAStatus` type. |
+| R10 | Gate A false-negative (reports stable when blockers exist) allows premature finality | Low | High | Gate A queries live data (MITL table, WAL events); no caching. Enrichment pipeline refreshes on every evaluation cycle. |
 
 ---
 
-## 9. Resources & References
+## 10. Resources & References
 
 ### npm Packages
 
