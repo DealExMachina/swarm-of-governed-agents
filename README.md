@@ -12,7 +12,7 @@ Most agent frameworks coordinate via DAGs: fixed pipelines where topology determ
 
 This project tests an alternative hypothesis: **declarative governance over shared state, combined with a semantic graph and formal convergence tracking, can produce auditable, converging agent coordination without fixed pipelines.**
 
-Concretely: four agents (facts, drift, planner, status) operate independently on shared context (Postgres WAL + S3). A governance agent enforces declarative transition rules and authorization policy (OpenFGA). A finality evaluator tracks convergence via a Lyapunov disagreement function and triggers human-in-the-loop review when the system plateaus. No agent knows about any other agent's existence. Coordination emerges from the shared state and the governance layer.
+Concretely: four agents (facts, drift, planner, status) operate independently on shared context (Postgres WAL + S3), gated by activation filters (when to run) and pressure-directed routing (which dimension needs work). A governance agent enforces declarative transition rules and authorization policy (OpenFGA), using a deterministic-first pipeline: rule evaluation runs first; an oversight agent may triage to full LLM or human review. A finality evaluator tracks convergence via a Lyapunov disagreement function and triggers human-in-the-loop review when the system plateaus. No agent knows about any other agent's existence. Coordination emerges from the shared state and the governance layer. Every governance decision is auditable (proposer, approver, rationale, governance path).
 
 The formal guarantee: if the Lyapunov function V(t) decreases monotonically across evaluation cycles, the system is asymptotically converging toward finality. If V increases, the system detects divergence and escalates. If V stalls, it detects plateau and routes to human review. See [docs/convergence.md](docs/convergence.md) for the full theory.
 
@@ -25,7 +25,7 @@ The formal guarantee: if the Lyapunov function V(t) decreases monotonically acro
 | **Premature closure** | Threshold check on a snapshot; transient spike triggers resolution | Monotonicity gate: score must be non-decreasing for 3 consecutive rounds |
 | **Silent stagnation** | No detection mechanism; agents cycle forever at sub-threshold | Plateau detection: EMA of progress ratio triggers HITL when stalled |
 | **Cascade failures** | DAG edge fails, everything downstream fails | No edges to fail; agents read shared state independently |
-| **No audit trail** | Decisions scattered in code, no record of *why* | Every transition logged to append-only WAL with proposer, approver, rationale, governance path |
+| **No audit trail** | Decisions scattered in code, no record of *why* | Every transition logged to append-only WAL with proposer, approver, rationale, and `governance_path` (which code path produced the decision: processProposal, oversight_acceptDeterministic, oversight_escalateToLLM, oversight_escalateToHuman, processProposalWithAgent) |
 | **Unbounded lifecycles** | "Run until done" — but what is done? | Four terminal states: RESOLVED, ESCALATED, BLOCKED, EXPIRED — each with defined semantics |
 | **Contradictions absorbed silently** | New data overwrites old | CRDT-inspired upserts; contradictions are first-class graph edges; governance blocks on drift |
 
@@ -49,7 +49,7 @@ The architecture rests on three principles:
 
 **1. Shared, append-only context.** Every agent reads from the same event log (Postgres WAL) and the same facts/drift state (S3). There is no "agent A's context" vs "agent B's context." There is context. Agents read it, reason over it, propose changes, and wait for approval.
 
-**2. Proposals and approvals.** No agent directly advances the state. A facts agent proposes `FactsExtracted`; the governance agent checks whether that transition is currently allowed (given drift level, policy, epoch); the executor performs it if approved. This produces an audit trail: every transition has a reason, a proposer, and an approver.
+**2. Proposals and approvals.** No agent directly advances the state. A facts agent proposes `FactsExtracted`; the governance agent checks whether that transition is currently allowed (given drift level, policy, epoch); the executor performs it if approved. This produces an audit trail: every transition has a reason, a proposer, and an approver. In YOLO mode, deterministic evaluation runs first; an optional oversight agent then triages: accept the deterministic result, escalate to full LLM reasoning, or route to human review. Every decision records which path produced it (`governance_path`) in the append-only WAL.
 
 **3. Declarative rules, not imperative code.** `governance.yaml` expresses transition rules and remediation actions. Rules are evaluated at runtime, not compiled into graph edges. Adding a new constraint is a YAML change, not a refactor.
 
@@ -61,7 +61,7 @@ stateDiagram-v2
   DriftChecked --> ContextIngested: planner/status, governance
 ```
 
-The result: agents are **reasoning roles**, not pipeline stages. The coordination emerges from the shared context and the governance layer — not from wiring. See [docs/architecture.md](docs/architecture.md) for the full technical deep dive.
+The result: agents are **reasoning roles**, not pipeline stages. The coordination emerges from the shared context and the governance layer — not from wiring. Activation filters (hash_delta, sequence_delta, pressure_directed, timer) gate when each agent runs; the pressure-directed filter routes agents toward the convergence dimension with highest need. A tuner agent can optimize filter parameters at runtime. See [docs/architecture.md](docs/architecture.md) for the full technical deep dive.
 
 ---
 
@@ -173,9 +173,11 @@ See [docs/validation.md](docs/validation.md) for the complete test methodology a
 
 **Convergence history:** Postgres `convergence_history` (scope_id, epoch, goal_score, lyapunov_v, dimension_scores JSONB, pressure JSONB). Append-only.
 
-**Governance loop:** Planner proposes -> governance checks rules + OpenFGA -> executor performs approved advance. Every decision logged.
+**Governance loop:** Planner proposes -> governance checks rules + OpenFGA -> (YOLO: optional oversight agent triages deterministic result to accept/escalate-to-LLM/escalate-to-human) -> executor performs approved advance. Every decision logged with governance path.
 
 **Finality:** After each governance round, `evaluateFinality(scopeId)` runs against the semantic graph and convergence history. Monotonicity gate + plateau detection + divergence detection.
+
+**Activation filters:** Per-agent gates (hash_delta, sequence_delta, timer, pressure_directed, composite) decide when each agent runs. Stored in Postgres; tuner agent can optimize parameters. Pressure-directed filter routes agents to the convergence dimension with highest need.
 
 **Facts-worker:** Python (FastAPI + DSPy). Runs in Docker. Pluggable LLM backend (Ollama or OpenAI).
 
@@ -272,9 +274,9 @@ Set in `governance.yaml`:
 
 | Mode | Behaviour |
 |------|-----------|
-| `YOLO` | Governance agent approves all valid transitions automatically. |
+| `YOLO` | Deterministic evaluation first; if LLM configured, oversight agent triages: accept deterministic, escalate to full LLM, or route to human. Otherwise auto-approves valid transitions. |
 | `MITL` | Every proposal goes to the MITL queue; a human approves or rejects. |
-| `MASTER` | Deterministic rule-based path; no LLM rationale. |
+| `MASTER` | Deterministic rule-based path; no LLM rationale. Master override for all valid transitions. |
 
 ---
 
@@ -338,10 +340,12 @@ For current status, verified functionality, and next steps, see **STATUS.md**.
 
 ## Further reading
 
-- [docs/architecture.md](docs/architecture.md) — event bus internals, state machine, database schema, governance loop
+- [docs/architecture.md](docs/architecture.md) — event bus internals, state machine, database schema, governance loop, activation filters, oversight agent
 - [docs/convergence.md](docs/convergence.md) — formal convergence theory, configuration reference, benchmark scenarios
 - [docs/validation.md](docs/validation.md) — test methodology, what's proven vs theoretical, known gaps
 - [docs/demo.md](docs/demo.md) — Project Horizon M&A demo walkthrough
+- [docs/governance-design.md](docs/governance-design.md) — architectural direction: OPA-WASM policy engine, Gate A (authorization stability precondition), obligation model
+- [docs/agent-hatching-design.md](docs/agent-hatching-design.md) — dynamic, load-aware agent lifecycle and scaling (M/M/c, pressure-directed priority)
 
 ---
 
