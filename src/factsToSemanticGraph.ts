@@ -46,11 +46,16 @@ export interface FactsPayload {
 }
 
 /**
- * Parse NLI-style contradiction string into two claim fragments for matching.
- * Format: NLI: "claimA..." vs "claimB..."
+ * Parse contradiction string into two claim fragments for edge creation.
+ * Handles multiple formats:
+ *   - NLI: "claimA..." vs "claimB..."
+ *   - X contradicts Y
+ *   - Prose: "Initial briefing claimed X, which contradicts Y"
+ *   - Prose with "versus/vs/while/but": "X versus Y"
  */
 function parseNliContradiction(s: string): [string, string] | null {
   const trimmed = s.trim();
+
   const nli = /^NLI:\s*"(.*?)"\s+vs\s+"(.*?)"/s;
   const m = trimmed.match(nli);
   if (m) {
@@ -58,13 +63,25 @@ function parseNliContradiction(s: string): [string, string] | null {
     const b = m[2].replace(/\.\.\.$/, "").trim();
     if (a && b) return [a, b];
   }
-  const fallback = /^(.*?)\s+contradicts\s+(.*)$/i.exec(trimmed);
-  if (fallback) return [fallback[1].trim(), fallback[2].trim()];
+
+  const contradicts = /^(.*?)\s+contradicts?\s+(.*)$/i.exec(trimmed);
+  if (contradicts) return [contradicts[1].trim(), contradicts[2].trim()];
+
+  const whichContradicts = /(.+?),?\s+which\s+contradicts?\s+(.+)/i.exec(trimmed);
+  if (whichContradicts) return [whichContradicts[1].trim(), whichContradicts[2].trim()];
+
+  const versus = /(.+?)\s+(?:versus|vs\.?)\s+(.+)/i.exec(trimmed);
+  if (versus) return [versus[1].trim(), versus[2].trim()];
+
+  const butWhile = /(.+?),?\s+(?:but|while|whereas|however)\s+(.+)/i.exec(trimmed);
+  if (butWhile) return [butWhile[1].trim(), butWhile[2].trim()];
+
   return null;
 }
 
 /**
- * Find best-matching claim node id from content->nodeId map (exact or starts-with).
+ * Find best-matching claim node id from content->nodeId map.
+ * Uses exact match, prefix match, then token overlap as fallback.
  */
 export function findClaimNodeId(
   contentToId: Map<string, string>,
@@ -77,7 +94,21 @@ export function findClaimNodeId(
     if (content === fragment || content.startsWith(fragment) || fragment.startsWith(content))
       return id;
   }
-  return null;
+  const fragWords = new Set(fragment.toLowerCase().split(/\s+/).filter(w => w.length > 3));
+  if (fragWords.size === 0) return null;
+  let bestId: string | null = null;
+  let bestScore = 0;
+  for (const [content, id] of contentToId) {
+    const contentWords = new Set(content.toLowerCase().split(/\s+/).filter(w => w.length > 3));
+    let overlap = 0;
+    for (const w of fragWords) if (contentWords.has(w)) overlap++;
+    const score = overlap / Math.max(fragWords.size, 1);
+    if (score > bestScore && score >= 0.3) {
+      bestScore = score;
+      bestId = id;
+    }
+  }
+  return bestId;
 }
 
 /**
@@ -240,35 +271,68 @@ export async function syncFactsToSemanticGraph(
     }
 
     // --- Mark stale nodes as "irrelevant" (not deleted — CRDT append-only) ---
+    // Only stale nodes that are "active" AND created by facts-sync. Never stale
+    // nodes that were resolved/in_progress by human resolution or other sources.
+    const STALEABLE_STATUSES = new Set(["active"]);
+    const PROTECTED_CREATORS = new Set(["resolution"]);
     for (const node of existingClaims) {
-      if (!matchedClaimIds.has(node.node_id) && node.status === "active") {
+      if (!matchedClaimIds.has(node.node_id) && STALEABLE_STATUSES.has(node.status) && !PROTECTED_CREATORS.has(node.created_by ?? "")) {
         await updateNodeStatus(node.node_id, "irrelevant", client);
         nodesStaled++;
       }
     }
     for (const node of existingGoals) {
-      if (!matchedGoalIds.has(node.node_id) && node.status === "active") {
+      if (!matchedGoalIds.has(node.node_id) && STALEABLE_STATUSES.has(node.status) && !PROTECTED_CREATORS.has(node.created_by ?? "")) {
         await updateNodeStatus(node.node_id, "irrelevant", client);
         nodesStaled++;
       }
     }
     for (const node of existingRisks) {
-      if (!matchedRiskIds.has(node.node_id) && node.status === "active") {
+      if (!matchedRiskIds.has(node.node_id) && STALEABLE_STATUSES.has(node.status) && !PROTECTED_CREATORS.has(node.created_by ?? "")) {
         await updateNodeStatus(node.node_id, "irrelevant", client);
         nodesStaled++;
       }
     }
 
-    // --- Contradictions: only create if no resolving edge exists (irreversible resolution) ---
+    // --- Contradictions: create nodes AND edges ---
+    // Load existing contradiction nodes to avoid duplicates
+    const existingContras = await queryNodesByCreator(scopeId, FACTS_SYNC_SOURCE, "contradiction", client);
+    const matchedContraIds = new Set<string>();
+
     for (const raw of contradictions) {
       const str = typeof raw === "string" ? raw : String(raw);
+      if (!str.trim()) continue;
+
+      // Always create/upsert a contradiction node so it's counted in finality
+      const existingContra = matchExistingNode(existingContras, str.trim());
+      if (existingContra) {
+        matchedContraIds.add(existingContra.node_id);
+        if (existingContra.status !== "active") {
+          await updateNodeStatus(existingContra.node_id, "active", client);
+        }
+      } else {
+        await appendNode(
+          {
+            scope_id: scopeId,
+            type: "contradiction",
+            content: str.trim(),
+            status: "active",
+            source_ref: { source: "facts" },
+            created_by: FACTS_SYNC_SOURCE,
+            ...(hasValidTime && { valid_from: validFrom ?? null, valid_to: validTo ?? null }),
+          },
+          client,
+        );
+        nodesCreated++;
+      }
+
+      // Try to create edge between the conflicting claims
       const pair = parseNliContradiction(str);
       if (!pair) continue;
       const [a, b] = pair;
       const sourceId = findClaimNodeId(claimContentToNodeId, a);
       const targetId = findClaimNodeId(claimContentToNodeId, b);
       if (sourceId && targetId && sourceId !== targetId) {
-        // Irreversible resolution: if a resolves edge exists, do not re-create contradiction
         const resolved = await hasResolvingEdge(scopeId, sourceId, targetId, client);
         if (!resolved) {
           await appendEdge(
@@ -286,6 +350,14 @@ export async function syncFactsToSemanticGraph(
           );
           edgesCreated++;
         }
+      }
+    }
+
+    // Stale unmatched contradiction nodes
+    for (const node of existingContras) {
+      if (!matchedContraIds.has(node.node_id) && node.status === "active") {
+        await updateNodeStatus(node.node_id, "irrelevant", client);
+        nodesStaled++;
       }
     }
   });

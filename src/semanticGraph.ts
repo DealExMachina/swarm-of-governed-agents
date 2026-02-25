@@ -402,7 +402,8 @@ export async function loadFinalitySnapshot(scopeId: string): Promise<FinalitySna
   );
   const scopeRiskScore = Math.min(1, Math.max(0, Number(assessmentRes.rows[0]?.risk_score ?? 0)));
 
-  const contraRes = await p.query(
+  // Contradiction count from edges (linked contradiction pairs)
+  const contraEdgeRes = await p.query(
     `SELECT COUNT(*)::int AS total FROM edges e
      JOIN nodes n1 ON n1.node_id = e.source_id AND n1.scope_id = e.scope_id AND n1.superseded_at IS NULL
      JOIN nodes n2 ON n2.node_id = e.target_id AND n2.scope_id = e.scope_id AND n2.superseded_at IS NULL
@@ -413,10 +414,20 @@ export async function loadFinalitySnapshot(scopeId: string): Promise<FinalitySna
      )`,
     [scopeId],
   );
-  const contradictionsTotal = Number(contraRes.rows[0]?.total ?? 0);
+  const edgeContradictions = Number(contraEdgeRes.rows[0]?.total ?? 0);
 
-  // Unresolved contradictions: no resolving edge AND valid-time overlap (or both atemporal).
-  const unresolvedRes = await p.query(
+  // Also count contradiction nodes that couldn't be linked as edges (text-only contradictions from LLM)
+  const contraNodeRes = await p.query(
+    `SELECT COUNT(*)::int AS total FROM nodes
+     WHERE scope_id = $1 AND type = 'contradiction' AND status = 'active' AND (${CURRENT_VIEW_NODES})`,
+    [scopeId],
+  );
+  const nodeContradictions = Number(contraNodeRes.rows[0]?.total ?? 0);
+
+  const contradictionsTotal = Math.max(edgeContradictions, nodeContradictions);
+
+  // Unresolved: edge-based contradictions without resolving edges + all unresolved contradiction nodes
+  const unresolvedEdgeRes = await p.query(
     `SELECT COUNT(*)::int AS c FROM edges e
      JOIN nodes n1 ON n1.node_id = e.source_id AND n1.scope_id = e.scope_id AND n1.superseded_at IS NULL
      JOIN nodes n2 ON n2.node_id = e.target_id AND n2.scope_id = e.scope_id AND n2.superseded_at IS NULL
@@ -428,7 +439,8 @@ export async function loadFinalitySnapshot(scopeId: string): Promise<FinalitySna
      AND NOT EXISTS (SELECT 1 FROM edges r WHERE r.scope_id = e.scope_id AND r.edge_type = 'resolves' AND r.superseded_at IS NULL AND (r.valid_to IS NULL OR r.valid_to > now()) AND (r.target_id = e.source_id OR r.target_id = e.target_id))`,
     [scopeId],
   );
-  const contradictionsUnresolved = Number(unresolvedRes.rows[0]?.c ?? contradictionsTotal);
+  const unresolvedEdges = Number(unresolvedEdgeRes.rows[0]?.c ?? edgeContradictions);
+  const contradictionsUnresolved = Math.max(unresolvedEdges, nodeContradictions);
 
   // Gate B: contradiction mass (severity weight per unresolved; default 1.0 each).
   const contradiction_mass = contradictionsUnresolved * 1.0;
