@@ -151,19 +151,14 @@ Plan for addressing code smells and refactoring opportunities identified in the 
 
 ## Phase 5: Split feed.ts
 
-### 5.1 Separate routes, handlers, and UI
+### 5.1 Extract feed utilities (DONE)
 
-**Goal:** Clear separation of HTTP, business logic, and presentation.
+**Completed:** Extracted `src/feed/feedBus.ts` (EventBus singleton) and `src/feed/utils.ts` (getPathname, getQuery, sendJson, readJsonBody). `feed.ts` imports from these. Handlers and routing remain in feed.ts for now.
 
-**Steps:**
-1. Create `src/feed/` directory.
-2. Extract:
-   - `routes.ts` — route registration, param parsing
-   - `handlers.ts` — GET summary, convergence, POST context/docs, etc.; pure handlers returning data
-   - `sse.ts` — SSE wiring and event forwarding
-   - `ui.ts` or `static.ts` — inline HTML/JS for demo UI (or move to static files)
-3. `feed.ts` becomes a thin entry point that composes these.
-4. Run feed-related tests; manual smoke of feed endpoints and demo UI.
+**Remaining (optional):**
+- Extract handlers to `handlers.ts`
+- Extract SSE logic to `sse.ts`
+- Extract INDEX_HTML to `ui.ts`
 
 **Verification:** Feed API and demo UI behavior unchanged.
 

@@ -5,7 +5,6 @@
 import "dotenv/config";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { join } from "path";
-import { makeEventBus, type EventBus } from "./eventBus.js";
 import type { PushSubscription } from "./eventBus.js";
 import { appendEvent } from "./contextWal.js";
 import { createSwarmEvent } from "./events.js";
@@ -22,22 +21,8 @@ import { getConvergenceState, type ConvergenceState } from "./convergenceTracker
 import { getGraphSummary, appendResolutionGoal } from "./semanticGraph.js";
 import { getLatestFinalityDecision } from "./finalityDecisions.js";
 import { requireBearer } from "./auth.js";
-
-// ── Persistent EventBus singleton ────────────────────────────────────────────
-// Reused across all requests (avoids creating/destroying NATS connections per POST).
-
-let _feedBus: EventBus | null = null;
-
-async function getFeedBus(): Promise<EventBus> {
-  if (!_feedBus) {
-    _feedBus = await makeEventBus();
-    await _feedBus.ensureStream(
-      process.env.NATS_STREAM ?? "SWARM_JOBS",
-      ["swarm.events.>"],
-    );
-  }
-  return _feedBus;
-}
+import { getFeedBus } from "./feed/feedBus.js";
+import { getPathname, getQuery, sendJson, readJsonBody } from "./feed/utils.js";
 
 const FEED_PORT = parseInt(process.env.FEED_PORT ?? "3002", 10);
 const NATS_STREAM = process.env.NATS_STREAM ?? "SWARM_JOBS";
@@ -45,48 +30,6 @@ const S3_BUCKET = process.env.S3_BUCKET ?? null;
 const GOVERNANCE_PATH = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
 const SCOPE_ID = process.env.SCOPE_ID ?? "default";
 const MITL_URL = (process.env.MITL_URL ?? "http://localhost:3001").replace(/\/$/, "");
-
-function getPathname(url: string): string {
-  try {
-    return new URL(url, "http://localhost").pathname;
-  } catch {
-    return url.split("?")[0] ?? "/";
-  }
-}
-
-function getQuery(url: string): Record<string, string> {
-  try {
-    const u = new URL(url, "http://localhost");
-    const out: Record<string, string> = {};
-    u.searchParams.forEach((v, k) => {
-      out[k] = v;
-    });
-    return out;
-  } catch {
-    return {};
-  }
-}
-
-function sendJson(res: ServerResponse, status: number, data: Record<string, unknown>): void {
-  res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(data));
-}
-
-function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk) => chunks.push(chunk as Buffer));
-    req.on("end", () => {
-      try {
-        const raw = Buffer.concat(chunks).toString("utf-8");
-        resolve(raw ? (JSON.parse(raw) as Record<string, unknown>) : {});
-      } catch (e) {
-        reject(e);
-      }
-    });
-    req.on("error", reject);
-  });
-}
 
 /** POST /context/docs: add a document to the WAL (type context_doc). Triggers facts pipeline. */
 async function handleAddDoc(req: IncomingMessage, res: ServerResponse): Promise<void> {
