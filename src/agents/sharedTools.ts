@@ -8,6 +8,47 @@ import { join } from "path";
 
 const KEY_FACTS = "facts/latest.json";
 const KEY_DRIFT = "drift/latest.json";
+
+/** Reference item in drift snapshot. */
+export interface DriftReference {
+  type?: string;
+  doc?: string;
+  excerpt?: string;
+}
+
+/** Parsed drift snapshot from drift/latest.json. */
+export interface DriftSnapshot {
+  level: string;
+  types: string[];
+  notes?: string[];
+  references?: DriftReference[];
+}
+
+/** Load and parse drift from S3. Returns null if missing or invalid. */
+export async function loadDrift(s3: S3Client, bucket: string): Promise<DriftSnapshot | null> {
+  const raw = await s3GetText(s3, bucket, KEY_DRIFT);
+  if (!raw) return null;
+  try {
+    const p = JSON.parse(raw) as { level?: string; types?: unknown; notes?: unknown; references?: unknown };
+    const refs = Array.isArray(p.references)
+      ? p.references.map((r: unknown) => {
+          const x = r as Record<string, unknown>;
+          return { type: x?.type != null ? String(x.type) : undefined, doc: x?.doc != null ? String(x.doc) : undefined, excerpt: x?.excerpt != null ? String(x.excerpt) : undefined };
+        })
+      : undefined;
+    return {
+      level: typeof p.level === "string" ? p.level : "none",
+      types: Array.isArray(p.types) ? p.types.map(String) : [],
+      notes: Array.isArray(p.notes) ? p.notes.map(String) : undefined,
+      references: refs,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Default drift when none exists. */
+export const DRIFT_NONE: DriftSnapshot = { level: "none", types: [] };
 const KEY_FACTS_HIST_PREFIX = "facts/history/";
 const GOVERNANCE_PATH = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
 
@@ -36,8 +77,10 @@ export function makeReadDriftTool(s3: S3Client, bucket: string) {
       drift: z.record(z.unknown()).nullable(),
     }),
     execute: async () => {
-      const raw = await s3GetText(s3, bucket, KEY_DRIFT);
-      const drift = raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
+      const snapshot = await loadDrift(s3, bucket);
+      const drift = snapshot
+        ? { level: snapshot.level, types: snapshot.types, ...(snapshot.notes && { notes: snapshot.notes }), ...(snapshot.references && { references: snapshot.references }) }
+        : null;
       return { drift };
     },
   });

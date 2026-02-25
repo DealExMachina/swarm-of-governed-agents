@@ -10,6 +10,7 @@
  * This guarantees the goal score is a ratchet — it only moves forward, never regresses.
  */
 
+import type pg from "pg";
 import {
   runInTransaction,
   appendNode,
@@ -92,6 +93,66 @@ function matchExistingNode(
 }
 
 /**
+ * Sync content-based entities (goals, risks) with upsert-or-insert and reactivate.
+ * Returns matched node ids and nodes created count.
+ */
+async function syncContentBasedEntities(
+  scopeId: string,
+  entityType: "goal" | "risk",
+  items: string[],
+  existingNodes: SemanticNode[],
+  extraProps: Record<string, unknown>,
+  client: pg.PoolClient,
+): Promise<{ matchedIds: Set<string>; nodesCreated: number }> {
+  const matchedIds = new Set<string>();
+  let nodesCreated = 0;
+  for (const content of items) {
+    if (typeof content !== "string" || !content.trim()) continue;
+    const trimmed = content.trim();
+    const existing = matchExistingNode(existingNodes, trimmed);
+    if (existing) {
+      matchedIds.add(existing.node_id);
+      if (existing.status !== "active") {
+        await updateNodeStatus(existing.node_id, "active", client);
+      }
+    } else {
+      await appendNode(
+        {
+          scope_id: scopeId,
+          type: entityType,
+          content: trimmed,
+          status: "active",
+          source_ref: { source: "facts" },
+          created_by: FACTS_SYNC_SOURCE,
+          ...extraProps,
+        },
+        client,
+      );
+      nodesCreated++;
+    }
+  }
+  return { matchedIds, nodesCreated };
+}
+
+/**
+ * Mark nodes not in matchedIds as irrelevant (stale detection).
+ */
+async function markStaleNodes(
+  existingNodes: SemanticNode[],
+  matchedIds: Set<string>,
+  client: pg.PoolClient,
+): Promise<number> {
+  let staled = 0;
+  for (const node of existingNodes) {
+    if (!matchedIds.has(node.node_id) && node.status === "active") {
+      await updateNodeStatus(node.node_id, "irrelevant", client);
+      staled++;
+    }
+  }
+  return staled;
+}
+
+/**
  * Sync facts for a scope into the semantic graph using monotonic upserts.
  *
  * Strategy (CRDT-inspired):
@@ -169,79 +230,19 @@ export async function syncFactsToSemanticGraph(
     }
 
     // --- Goals: upsert by content match ---
-    for (const content of goals) {
-      if (typeof content !== "string" || !content.trim()) continue;
-      const trimmed = content.trim();
-      const existing = matchExistingNode(existingGoals, trimmed);
-
-      if (existing) {
-        matchedGoalIds.add(existing.node_id);
-        if (existing.status !== "active") {
-          await updateNodeStatus(existing.node_id, "active", client);
-        }
-      } else {
-        await appendNode(
-          {
-            scope_id: scopeId,
-            type: "goal",
-            content: trimmed,
-            status: "active",
-            source_ref: { source: "facts" },
-            created_by: FACTS_SYNC_SOURCE,
-          },
-          client,
-        );
-        nodesCreated++;
-      }
-    }
+    const goalsResult = await syncContentBasedEntities(scopeId, "goal", goals, existingGoals, {}, client);
+    goalsResult.matchedIds.forEach((id) => matchedGoalIds.add(id));
+    nodesCreated += goalsResult.nodesCreated;
 
     // --- Risks: upsert by content match ---
-    for (const content of risks) {
-      if (typeof content !== "string" || !content.trim()) continue;
-      const trimmed = content.trim();
-      const existing = matchExistingNode(existingRisks, trimmed);
-
-      if (existing) {
-        matchedRiskIds.add(existing.node_id);
-        if (existing.status !== "active") {
-          await updateNodeStatus(existing.node_id, "active", client);
-        }
-      } else {
-        await appendNode(
-          {
-            scope_id: scopeId,
-            type: "risk",
-            content: trimmed,
-            status: "active",
-            metadata: { severity: "high" },
-            source_ref: { source: "facts" },
-            created_by: FACTS_SYNC_SOURCE,
-          },
-          client,
-        );
-        nodesCreated++;
-      }
-    }
+    const risksResult = await syncContentBasedEntities(scopeId, "risk", risks, existingRisks, { metadata: { severity: "high" } }, client);
+    risksResult.matchedIds.forEach((id) => matchedRiskIds.add(id));
+    nodesCreated += risksResult.nodesCreated;
 
     // --- Mark stale nodes as "irrelevant" (not deleted — CRDT append-only) ---
-    for (const node of existingClaims) {
-      if (!matchedClaimIds.has(node.node_id) && node.status === "active") {
-        await updateNodeStatus(node.node_id, "irrelevant", client);
-        nodesStaled++;
-      }
-    }
-    for (const node of existingGoals) {
-      if (!matchedGoalIds.has(node.node_id) && node.status === "active") {
-        await updateNodeStatus(node.node_id, "irrelevant", client);
-        nodesStaled++;
-      }
-    }
-    for (const node of existingRisks) {
-      if (!matchedRiskIds.has(node.node_id) && node.status === "active") {
-        await updateNodeStatus(node.node_id, "irrelevant", client);
-        nodesStaled++;
-      }
-    }
+    nodesStaled += await markStaleNodes(existingClaims, matchedClaimIds, client);
+    nodesStaled += await markStaleNodes(existingGoals, matchedGoalIds, client);
+    nodesStaled += await markStaleNodes(existingRisks, matchedRiskIds, client);
 
     // --- Contradictions: only create if no resolving edge exists (irreversible resolution) ---
     for (const raw of contradictions) {

@@ -5,8 +5,8 @@ import { z } from "zod";
 import { setMaxListeners } from "events";
 import { getChatModelConfig } from "../modelConfig.js";
 import { logger } from "../logger.js";
-import { s3GetText, s3PutJson } from "../s3.js";
-import { makeReadFactsTool, makeReadFactsHistoryTool, makeReadDriftTool } from "./sharedTools.js";
+import { s3PutJson } from "../s3.js";
+import { makeReadFactsTool, makeReadFactsHistoryTool, makeReadDriftTool, loadDrift, DRIFT_NONE } from "./sharedTools.js";
 
 const DRIFT_LLM_TIMEOUT_MS = 90_000;
 
@@ -102,8 +102,7 @@ export async function runDriftAgent(
       } finally {
         clearTimeout(timeoutId);
       }
-      const driftRaw = await s3GetText(s3, bucket, KEY_DRIFT);
-      const drift = driftRaw ? (JSON.parse(driftRaw) as { level: string; types: string[] }) : { level: "none", types: [] };
+      const drift = (await loadDrift(s3, bucket)) ?? DRIFT_NONE;
       return { wrote: [KEY_DRIFT], level: drift.level, types: drift.types };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -115,10 +114,7 @@ export async function runDriftAgent(
     }
   }
 
-  const driftRaw = await s3GetText(s3, bucket, KEY_DRIFT);
-  const drift = driftRaw
-    ? (JSON.parse(driftRaw) as { level: string; types: string[]; notes?: string[] })
-    : { level: "none", types: [] as string[], notes: ["no drift yet"] };
+  const drift = (await loadDrift(s3, bucket)) ?? { ...DRIFT_NONE, notes: ["no drift yet"] };
   const ts = new Date().toISOString();
   await s3PutJson(s3, bucket, KEY_DRIFT_HIST(ts), drift);
   return { wrote: [KEY_DRIFT_HIST(ts)], level: drift.level, types: drift.types };

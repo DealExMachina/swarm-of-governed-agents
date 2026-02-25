@@ -3,9 +3,8 @@ import type { S3Client } from "@aws-sdk/client-s3";
 import { Agent } from "@mastra/core/agent";
 import { getChatModelConfig } from "../modelConfig.js";
 import { logger } from "../logger.js";
-import { s3GetText } from "../s3.js";
 import { loadPolicies, getGovernanceForScope, evaluateRules } from "../governance.js";
-import { makeReadDriftTool, makeReadFactsTool, makeReadGovernanceRulesTool } from "./sharedTools.js";
+import { makeReadDriftTool, makeReadFactsTool, makeReadGovernanceRulesTool, loadDrift, DRIFT_NONE } from "./sharedTools.js";
 
 const GOVERNANCE_PATH = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
 
@@ -51,10 +50,7 @@ export async function runPlannerAgent(
           actions = [];
         }
       }
-      const driftRaw = await s3GetText(s3, bucket, "drift/latest.json");
-      const drift = driftRaw
-        ? (JSON.parse(driftRaw) as { level: string; types: string[] })
-        : { level: "none", types: [] as string[] };
+      const drift = (await loadDrift(s3, bucket)) ?? DRIFT_NONE;
       return { drift: { level: drift.level, types: drift.types }, actions, reasoning };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -66,10 +62,7 @@ export async function runPlannerAgent(
     }
   }
 
-  const driftRaw = await s3GetText(s3, bucket, "drift/latest.json");
-  const drift = driftRaw
-    ? (JSON.parse(driftRaw) as { level: string; types: string[] })
-    : { level: "none", types: [] as string[] };
+  const drift = (await loadDrift(s3, bucket)) ?? DRIFT_NONE;
   const scopeId = process.env.SCOPE_ID ?? "default";
   const config = getGovernanceForScope(scopeId, loadPolicies(GOVERNANCE_PATH));
   const actions = evaluateRules(drift, config);

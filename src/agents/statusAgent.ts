@@ -7,7 +7,7 @@ import { logger } from "../logger.js";
 import { s3GetText } from "../s3.js";
 import { appendEvent } from "../contextWal.js";
 import { createSwarmEvent } from "../events.js";
-import { makeReadFactsTool, makeReadDriftTool, makeReadContextTool } from "./sharedTools.js";
+import { makeReadFactsTool, makeReadDriftTool, makeReadContextTool, loadDrift } from "./sharedTools.js";
 
 const SHORT_PROMPT = "Summarize recent changes in 2-3 sentences for a short status update.";
 const FULL_PROMPT = "Produce a comprehensive status report: facts confidence, drift trends, recent actions, unresolved contradictions, recommended next steps.";
@@ -68,13 +68,12 @@ export async function runStatusAgent(
       const prompt = isFull ? FULL_PROMPT : SHORT_PROMPT;
       await agent.generate(prompt, { maxSteps: 8 });
       const factsRaw = await s3GetText(s3, bucket, "facts/latest.json");
-      const driftRaw = await s3GetText(s3, bucket, "drift/latest.json");
       const facts = factsRaw ? (JSON.parse(factsRaw) as Record<string, unknown>) : null;
-      const drift = driftRaw ? (JSON.parse(driftRaw) as Record<string, unknown>) : null;
+      const drift = await loadDrift(s3, bucket);
       const cardPayload = {
         ts: new Date().toISOString(),
         drift_level: drift?.level ?? "unknown",
-        drift_types: (drift?.types as string[]) ?? [],
+        drift_types: drift?.types ?? [],
         confidence: facts?.confidence ?? null,
         goals: (facts?.goals as string[]) ?? [],
         briefing_type: isFull ? "full" : "short",
@@ -94,16 +93,15 @@ export async function runStatusAgent(
   }
 
   const factsRaw = await s3GetText(s3, bucket, "facts/latest.json");
-  const driftRaw = await s3GetText(s3, bucket, "drift/latest.json");
   const facts = factsRaw ? (JSON.parse(factsRaw) as Record<string, unknown>) : null;
-  const drift = driftRaw ? (JSON.parse(driftRaw) as Record<string, unknown>) : null;
+  const drift = await loadDrift(s3, bucket);
   const cardPayload = {
     ts: new Date().toISOString(),
     drift_level: drift?.level ?? "unknown",
-    drift_types: (drift?.types as string[]) ?? [],
+    drift_types: drift?.types ?? [],
     confidence: facts?.confidence ?? null,
     goals: (facts?.goals as string[]) ?? [],
-    notes: (drift?.notes as string[]) ?? [],
+    notes: drift?.notes ?? [],
   };
   await appendEvent(
     createSwarmEvent("status_card", cardPayload, { source: "status_agent" }) as unknown as Record<string, unknown>,

@@ -3,6 +3,24 @@ import { join } from "path";
 import { parse as parseYaml } from "yaml";
 import { getFinalityThresholds } from "./modelConfig.js";
 
+/** Default weights for goal score computation (claim, contradiction, goal, risk). */
+export const DEFAULT_FINALITY_WEIGHTS = {
+  claim_confidence: 0.3,
+  contradiction_resolution: 0.3,
+  goal_completion: 0.25,
+  risk_score_inverse: 0.15,
+} as const;
+
+/** Thresholds for dimension status and blocker detection. */
+export const FINALITY_THRESHOLDS = {
+  claim_ok: 0.85,
+  claim_partial: 0.65,
+  goal_ok: 0.9,
+  goal_partial: 0.7,
+  risk_ok: 0.2,
+  risk_partial: 0.5,
+} as const;
+
 /**
  * Snapshot of scope-level aggregates used for finality conditions and goal score.
  * When semanticGraph exists, loadFinalitySnapshot should run a single aggregation query.
@@ -183,21 +201,16 @@ function evaluateOne(condition: string, snapshot: FinalitySnapshot): boolean {
  * Formula: claim_confidence * w1 + contradiction_resolution * w2 + goal_completion * w3 + risk_inverse * w4.
  */
 export function computeGoalScore(snapshot: FinalitySnapshot, config?: GoalGradientConfig): number {
-  const w = config?.weights ?? {
-    claim_confidence: 0.3,
-    contradiction_resolution: 0.3,
-    goal_completion: 0.25,
-    risk_score_inverse: 0.15,
-  };
+  const w = config?.weights ?? DEFAULT_FINALITY_WEIGHTS;
   const clampedRatio = (val: number, target: number) => Math.min(val / target, 1);
-  const claimPart = clampedRatio(snapshot.claims_active_avg_confidence, 0.85) * (w.claim_confidence ?? 0.3);
+  const claimPart = clampedRatio(snapshot.claims_active_avg_confidence, FINALITY_THRESHOLDS.claim_ok) * (w.claim_confidence ?? DEFAULT_FINALITY_WEIGHTS.claim_confidence);
   const contradictionPart =
     (snapshot.contradictions_total_count === 0
       ? 1
       : 1 - snapshot.contradictions_unresolved_count / snapshot.contradictions_total_count) *
-    (w.contradiction_resolution ?? 0.3);
-  const goalPart = snapshot.goals_completion_ratio * (w.goal_completion ?? 0.25);
-  const riskPart = (1 - Math.min(snapshot.scope_risk_score, 1)) * (w.risk_score_inverse ?? 0.15);
+    (w.contradiction_resolution ?? DEFAULT_FINALITY_WEIGHTS.contradiction_resolution);
+  const goalPart = snapshot.goals_completion_ratio * (w.goal_completion ?? DEFAULT_FINALITY_WEIGHTS.goal_completion);
+  const riskPart = (1 - Math.min(snapshot.scope_risk_score, 1)) * (w.risk_score_inverse ?? DEFAULT_FINALITY_WEIGHTS.risk_score_inverse);
   return Math.min(1, Math.max(0, claimPart + contradictionPart + goalPart + riskPart));
 }
 
@@ -389,14 +402,10 @@ function buildDimensionBreakdown(
   snapshot: FinalitySnapshot,
   goalGradient?: GoalGradientConfig,
 ): FinalityReviewRequest["dimension_breakdown"] {
-  const w = goalGradient?.weights ?? {
-    claim_confidence: 0.3,
-    contradiction_resolution: 0.3,
-    goal_completion: 0.25,
-    risk_score_inverse: 0.15,
-  };
-  const clampedRatio = (v: number, t: number) => Math.min(v / t, 1);
-  const claimScore = clampedRatio(snapshot.claims_active_avg_confidence, 0.85);
+  const w = goalGradient?.weights ?? DEFAULT_FINALITY_WEIGHTS;
+  const t = FINALITY_THRESHOLDS;
+  const clampedRatio = (v: number, target: number) => Math.min(v / target, 1);
+  const claimScore = clampedRatio(snapshot.claims_active_avg_confidence, t.claim_ok);
   const contraScore =
     snapshot.contradictions_total_count === 0
       ? 1
@@ -408,29 +417,29 @@ function buildDimensionBreakdown(
     {
       name: "claim_confidence",
       score: claimScore,
-      weight: w.claim_confidence ?? 0.3,
-      status: snapshot.claims_active_min_confidence >= 0.85 ? "ok" : snapshot.claims_active_min_confidence >= 0.65 ? "partial" : "blocking",
+      weight: w.claim_confidence ?? DEFAULT_FINALITY_WEIGHTS.claim_confidence,
+      status: snapshot.claims_active_min_confidence >= t.claim_ok ? "ok" : snapshot.claims_active_min_confidence >= t.claim_partial ? "partial" : "blocking",
       detail: `min ${(snapshot.claims_active_min_confidence * 100).toFixed(0)}%, avg ${(snapshot.claims_active_avg_confidence * 100).toFixed(0)}%`,
     },
     {
       name: "contradiction_resolution",
       score: contraScore,
-      weight: w.contradiction_resolution ?? 0.3,
+      weight: w.contradiction_resolution ?? DEFAULT_FINALITY_WEIGHTS.contradiction_resolution,
       status: snapshot.contradictions_unresolved_count === 0 ? "ok" : "blocking",
       detail: `${snapshot.contradictions_unresolved_count} of ${snapshot.contradictions_total_count} contradictions unresolved`,
     },
     {
       name: "goal_completion",
       score: goalScore,
-      weight: w.goal_completion ?? 0.25,
-      status: goalScore >= 0.9 ? "ok" : goalScore >= 0.7 ? "partial" : "blocking",
+      weight: w.goal_completion ?? DEFAULT_FINALITY_WEIGHTS.goal_completion,
+      status: goalScore >= t.goal_ok ? "ok" : goalScore >= t.goal_partial ? "partial" : "blocking",
       detail: `completion ratio ${(goalScore * 100).toFixed(0)}%`,
     },
     {
       name: "risk_score_inverse",
       score: riskScore,
-      weight: w.risk_score_inverse ?? 0.15,
-      status: snapshot.scope_risk_score < 0.2 ? "ok" : snapshot.scope_risk_score < 0.5 ? "partial" : "blocking",
+      weight: w.risk_score_inverse ?? DEFAULT_FINALITY_WEIGHTS.risk_score_inverse,
+      status: snapshot.scope_risk_score < t.risk_ok ? "ok" : snapshot.scope_risk_score < t.risk_partial ? "partial" : "blocking",
       detail: `scope risk score ${(snapshot.scope_risk_score * 100).toFixed(0)}%`,
     },
   ];
@@ -452,18 +461,19 @@ function buildBlockers(snapshot: FinalitySnapshot): FinalityReviewRequest["block
       description: `${snapshot.risks_critical_active_count} critical risk(s) active`,
     });
   }
-  if (snapshot.claims_active_min_confidence < 0.85) {
+  const t = FINALITY_THRESHOLDS;
+  if (snapshot.claims_active_min_confidence < t.claim_ok) {
     out.push({
       type: "low_confidence_claims",
       node_ids: [],
-      description: `min claim confidence ${(snapshot.claims_active_min_confidence * 100).toFixed(0)}% (need 85%)`,
+      description: `min claim confidence ${(snapshot.claims_active_min_confidence * 100).toFixed(0)}% (need ${(t.claim_ok * 100).toFixed(0)}%)`,
     });
   }
-  if (snapshot.goals_completion_ratio < 0.9) {
+  if (snapshot.goals_completion_ratio < t.goal_ok) {
     out.push({
       type: "missing_goal_resolution",
       node_ids: [],
-      description: `goals completion ${(snapshot.goals_completion_ratio * 100).toFixed(0)}% (need 90%)`,
+      description: `goals completion ${(snapshot.goals_completion_ratio * 100).toFixed(0)}% (need ${(t.goal_ok * 100).toFixed(0)}%)`,
     });
   }
   return out;

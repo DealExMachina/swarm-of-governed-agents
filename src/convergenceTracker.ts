@@ -12,6 +12,7 @@
  */
 
 import type { FinalitySnapshot, GoalGradientConfig } from "./finalityEvaluator.js";
+import { FINALITY_THRESHOLDS, DEFAULT_FINALITY_WEIGHTS } from "./finalityEvaluator.js";
 import { getPool } from "./db.js";
 import pg from "pg";
 
@@ -96,7 +97,7 @@ export function computeDimensionScores(
   snapshot: FinalitySnapshot,
   config?: GoalGradientConfig,
 ): Record<string, number> {
-  const claimScore = Math.min(snapshot.claims_active_avg_confidence / 0.85, 1);
+  const claimScore = Math.min(snapshot.claims_active_avg_confidence / FINALITY_THRESHOLDS.claim_ok, 1);
   const contraScore =
     snapshot.contradictions_total_count === 0
       ? 1
@@ -122,12 +123,7 @@ export function computeLyapunovV(
   targets: FinalityTargets = DEFAULT_FINALITY_TARGETS,
   weights?: GoalGradientConfig["weights"],
 ): number {
-  const w = weights ?? {
-    claim_confidence: 0.3,
-    contradiction_resolution: 0.3,
-    goal_completion: 0.25,
-    risk_score_inverse: 0.15,
-  };
+  const w = weights ?? DEFAULT_FINALITY_WEIGHTS;
   const dims = computeDimensionScores(snapshot);
 
   const v =
@@ -147,12 +143,7 @@ export function computePressure(
   snapshot: FinalitySnapshot,
   weights?: GoalGradientConfig["weights"],
 ): Record<string, number> {
-  const w = weights ?? {
-    claim_confidence: 0.3,
-    contradiction_resolution: 0.3,
-    goal_completion: 0.25,
-    risk_score_inverse: 0.15,
-  };
+  const w = weights ?? DEFAULT_FINALITY_WEIGHTS;
   const dims = computeDimensionScores(snapshot);
 
   return {
