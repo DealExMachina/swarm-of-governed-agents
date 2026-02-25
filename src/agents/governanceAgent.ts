@@ -5,7 +5,6 @@ import type { S3Client } from "@aws-sdk/client-s3";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { Agent } from "@mastra/core/agent";
-import { s3GetText } from "../s3.js";
 import { loadState } from "../stateGraph.js";
 import { loadPolicies, getGovernanceForScope, canTransition } from "../governance.js";
 import { checkPermission } from "../policy.js";
@@ -17,7 +16,7 @@ import { logger, setLogContext } from "../logger.js";
 import { recordProposal, recordPolicyViolation } from "../metrics.js";
 import { getChatModelConfig, getOversightModelConfig } from "../modelConfig.js";
 import type { Proposal, Action } from "../events.js";
-import { makeReadGovernanceRulesTool } from "./sharedTools.js";
+import { makeReadGovernanceRulesTool, loadDrift, DRIFT_NONE } from "./sharedTools.js";
 
 /** Result of deterministic governance evaluation (no side effects). */
 export interface DeterministicResult {
@@ -238,10 +237,7 @@ function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
       }),
     }),
     execute: async () => {
-      const raw = await s3GetText(env.s3, env.bucket, "drift/latest.json");
-      const drift = raw
-        ? (JSON.parse(raw) as { level: string; types: string[] })
-        : { level: "none", types: [] as string[] };
+      const drift = (await loadDrift(env.s3, env.bucket)) ?? DRIFT_NONE;
       return { drift };
     },
   });
@@ -255,10 +251,7 @@ function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
       reason: z.string(),
     }),
     execute: async () => {
-      const raw = await s3GetText(env.s3, env.bucket, "drift/latest.json");
-      const drift = raw
-        ? (JSON.parse(raw) as { level: string; types: string[] })
-        : { level: "none", types: [] as string[] };
+      const drift = (await loadDrift(env.s3, env.bucket)) ?? DRIFT_NONE;
       const govPath = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
       const governance = getGovernanceForScope(SCOPE_ID, loadPolicies(govPath));
       if (from === undefined || to === undefined) {
@@ -298,10 +291,7 @@ function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
       if (!state || state.epoch !== expectedEpoch) {
         return { ok: false, error: "state_epoch_mismatch" };
       }
-      const driftRaw = await s3GetText(env.s3, env.bucket, "drift/latest.json");
-      const drift = driftRaw
-        ? (JSON.parse(driftRaw) as { level: string; types: string[] })
-        : { level: "none", types: [] as string[] };
+      const drift = (await loadDrift(env.s3, env.bucket)) ?? DRIFT_NONE;
       const govPath = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
       const governance = getGovernanceForScope(SCOPE_ID, loadPolicies(govPath));
       if (from === undefined || to === undefined) {
@@ -453,10 +443,7 @@ export async function evaluateProposalDeterministic(
     return { outcome: "reject", reason: "state_epoch_mismatch" };
   }
 
-  const driftRaw = await s3GetText(env.s3, env.bucket, "drift/latest.json");
-  const drift = driftRaw
-    ? (JSON.parse(driftRaw) as { level: string; types: string[] })
-    : { level: "none", types: [] as string[] };
+  const drift = (await loadDrift(env.s3, env.bucket)) ?? DRIFT_NONE;
   const govPath = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
   const governance = getGovernanceForScope(SCOPE_ID, loadPolicies(govPath));
 

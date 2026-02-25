@@ -3,7 +3,8 @@ import { join } from "path";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { Agent } from "@mastra/core/agent";
-import { makeS3, s3GetText } from "./s3.js";
+import { makeS3 } from "./s3.js";
+import { loadDrift, DRIFT_NONE } from "./agents/sharedTools.js";
 import { advanceState, loadState, transitions, type Node, type GraphState } from "./stateGraph.js";
 import { getNextJobForNode } from "./agentRegistry.js";
 import { loadPolicies, getGovernanceForScope } from "./governance.js";
@@ -75,10 +76,7 @@ function createExecutorTools(
       }),
     }),
     execute: async () => {
-      const raw = await s3GetText(s3, bucket, "drift/latest.json");
-      const drift = raw
-        ? (JSON.parse(raw) as { level: string; types: string[] })
-        : { level: "none", types: [] as string[] };
+      const drift = (await loadDrift(s3, bucket)) ?? DRIFT_NONE;
       return { drift };
     },
   });
@@ -98,10 +96,7 @@ function createExecutorTools(
       }
       const scopeId = payload.scope_id ?? process.env.SCOPE_ID ?? "default";
       const governance = getGovernanceForScope(scopeId, loadPolicies(govPath));
-      const driftRaw = await s3GetText(s3, bucket, "drift/latest.json");
-      const drift = driftRaw
-        ? (JSON.parse(driftRaw) as { level: string; types: string[] })
-        : { level: "none", types: [] as string[] };
+      const drift = (await loadDrift(s3, bucket)) ?? DRIFT_NONE;
       const newState = await advanceState(payload.expectedEpoch, { scopeId, drift, governance });
       if (!newState) {
         const current = await loadState(scopeId);
@@ -219,10 +214,7 @@ async function executeActionInline(
   } else {
     const govPath = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
     const governance = getGovernanceForScope(scopeId, loadPolicies(govPath));
-    const driftRaw = await s3GetText(s3, bucket, "drift/latest.json");
-    const drift = driftRaw
-      ? (JSON.parse(driftRaw) as { level: string; types: string[] })
-      : { level: "none", types: [] as string[] };
+    const drift = (await loadDrift(s3, bucket)) ?? DRIFT_NONE;
     newState = await advanceState(expectedEpoch, { scopeId, drift, governance });
   }
   if (!newState) {

@@ -13,6 +13,7 @@ import { loadState } from "./stateGraph.js";
 import { tailEvents } from "./contextWal.js";
 import { makeS3 } from "./s3.js";
 import { s3GetText } from "./s3.js";
+import { loadDrift } from "./agents/sharedTools.js";
 import { toErrorString } from "./errors.js";
 import { getPool } from "./db.js";
 import { loadPolicies, getGovernanceForScope, evaluateRules } from "./governance.js";
@@ -196,14 +197,13 @@ async function handleSummary(res: ServerResponse): Promise<void> {
     const state = await loadState(SCOPE_ID);
     const recent = await tailEvents(20);
     let facts: Record<string, unknown> | null = null;
-    let drift: Record<string, unknown> | null = null;
+    let drift: { level: string; types: string[]; notes?: string[]; references?: Array<{ type?: string; doc?: string; excerpt?: string }> } | null = null;
     if (S3_BUCKET) {
       try {
         const s3 = makeS3();
         const factsRaw = await s3GetText(s3, S3_BUCKET, "facts/latest.json");
-        const driftRaw = await s3GetText(s3, S3_BUCKET, "drift/latest.json");
         if (factsRaw) facts = JSON.parse(factsRaw) as Record<string, unknown>;
-        if (driftRaw) drift = JSON.parse(driftRaw) as Record<string, unknown>;
+        drift = await loadDrift(s3, S3_BUCKET);
       } catch {
         // S3 optional for summary
       }
@@ -222,9 +222,9 @@ async function handleSummary(res: ServerResponse): Promise<void> {
         : null,
       drift: (() => {
         if (!drift) return null;
-        const level = String(drift.level ?? "unknown");
-        const types = (drift.types as string[]) ?? [];
-        const notes = (drift.notes as string[]) ?? [];
+        const level = drift.level;
+        const types = drift.types;
+        const notes = drift.notes ?? [];
         let suggested_actions: string[] = [];
         try {
           const config = getGovernanceForScope(SCOPE_ID, loadPolicies(GOVERNANCE_PATH));
@@ -232,7 +232,7 @@ async function handleSummary(res: ServerResponse): Promise<void> {
         } catch {
           // governance file optional for summary
         }
-        const references = (drift.references as Array<{ type?: string; doc?: string; excerpt?: string }>) ?? [];
+        const references = drift.references ?? [];
         return { level, types, notes, suggested_actions, references };
       })(),
       what_changed: recent
