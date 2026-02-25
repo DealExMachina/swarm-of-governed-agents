@@ -485,17 +485,11 @@ async function getEvidenceCoverageForScope(
 }
 
 /**
- * Process a user resolution: one submission may contain multiple resolutions
- * (e.g. "ARR confirmed at 38M. Retention package secured for CTO.").
+ * Process a user resolution: one submission may contain multiple resolutions.
  *
- * Strategy:
- * 1. Split the decision into sentences/clauses
- * 2. For each active goal, check if ANY sentence matches (Jaccard on tokens)
- * 3. Also check the full text against each goal (catches compound sentences)
- * 4. Mark all matched goals as resolved
- * 5. If nothing matched, create a new resolved goal as fallback
- *
- * Returns the first resolved node_id (for backward compat).
+ * Uses an LLM matching agent when available: sends the resolution text + active goals,
+ * gets back which goals are addressed (fully/partially/not).
+ * Falls back to deterministic tokenization + synonym matching when no LLM is configured.
  */
 export async function appendResolutionGoal(
   scopeId: string,
@@ -504,7 +498,6 @@ export async function appendResolutionGoal(
   client?: pg.PoolClient,
 ): Promise<string> {
   const q: Queryable = client ?? getPool();
-  const MATCH_THRESHOLD = 0.12;
 
   const activeGoals = await q.query(
     `SELECT node_id, content FROM nodes
@@ -513,27 +506,33 @@ export async function appendResolutionGoal(
     [scopeId],
   );
 
-  const sentences = splitIntoSentences(decision);
-  const fullTokens = tokenize(decision);
-  const expandedTokens = expandSynonyms(fullTokens);
-  const sentenceTokenSets = sentences.map(s => expandSynonyms(tokenize(s)));
+  const goals = activeGoals.rows.map((r) => ({
+    node_id: (r as { node_id: string }).node_id,
+    content: (r as { content: string }).content,
+  }));
+
+  let matches: GoalMatch[];
+  try {
+    matches = await matchGoalsWithLLM(decision, goals);
+  } catch {
+    matches = matchGoalsDeterministic(decision, goals);
+  }
+
   const matched: string[] = [];
-
-  for (const row of activeGoals.rows) {
-    const goal = row as { node_id: string; content: string };
-    const goalTokens = expandSynonyms(tokenize(goal.content));
-
-    const score = bestMatchScore(expandedTokens, sentenceTokenSets, goalTokens);
-
-    if (score >= MATCH_THRESHOLD) {
-      await q.query(
-        `UPDATE nodes SET status = 'resolved', updated_at = now(), version = version + 1,
-         source_ref = source_ref || $2::jsonb
-         WHERE node_id = $1`,
-        [goal.node_id, JSON.stringify({ resolved_by: "resolution", decision_preview: decision.trim().slice(0, 200) })],
-      );
-      matched.push(goal.node_id);
-    }
+  for (const m of matches) {
+    if (m.status === "not_addressed") continue;
+    const newStatus = m.status === "fully_resolved" ? "resolved" : "in_progress";
+    await q.query(
+      `UPDATE nodes SET status = $2, updated_at = now(), version = version + 1,
+       source_ref = source_ref || $3::jsonb
+       WHERE node_id = $1`,
+      [m.node_id, newStatus, JSON.stringify({
+        resolved_by: "resolution",
+        match_confidence: m.confidence,
+        decision_preview: decision.trim().slice(0, 200),
+      })],
+    );
+    matched.push(m.node_id);
   }
 
   if (matched.length > 0) {
@@ -554,6 +553,83 @@ export async function appendResolutionGoal(
     },
     client,
   );
+}
+
+interface GoalMatch {
+  node_id: string;
+  status: "fully_resolved" | "partially_resolved" | "not_addressed";
+  confidence: number;
+}
+
+async function matchGoalsWithLLM(
+  decision: string,
+  goals: Array<{ node_id: string; content: string }>,
+): Promise<GoalMatch[]> {
+  const { getChatModelConfig } = await import("./modelConfig.js");
+  const config = getChatModelConfig();
+  if (!config || goals.length === 0) return matchGoalsDeterministic(decision, goals);
+
+  const goalsText = goals.map((g, i) => `${i + 1}. [${g.node_id}] ${g.content}`).join("\n");
+  const prompt = `A user submitted this resolution:\n"${decision.trim()}"\n\nHere are the active goals:\n${goalsText}\n\nFor each goal, decide if the resolution addresses it. Reply with ONLY a JSON array, one object per goal:\n[{"id":"<node_id>","status":"fully_resolved"|"partially_resolved"|"not_addressed","confidence":0.0-1.0}]\n\n- "fully_resolved": the resolution clearly answers or completes this goal\n- "partially_resolved": the resolution provides relevant information but doesn't fully close the goal\n- "not_addressed": the resolution is unrelated to this goal\n\nBe generous: if the resolution mentions a topic related to the goal, mark it at least partially_resolved. Reply with ONLY the JSON array, no other text.`;
+
+  const url = `${config.url.replace(/\/+$/, "")}/chat/completions`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: config.id.replace(/^openai\//, ""),
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 500,
+      temperature: 0,
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
+
+  if (!res.ok) throw new Error(`LLM ${res.status}`);
+  const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+  const text = data.choices?.[0]?.message?.content ?? "";
+
+  const jsonMatch = text.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) throw new Error("No JSON array in LLM response");
+
+  const parsed = JSON.parse(jsonMatch[0]) as Array<{ id: string; status: string; confidence: number }>;
+  const validStatuses = ["fully_resolved", "partially_resolved", "not_addressed"];
+  const goalIds = new Set(goals.map(g => g.node_id));
+
+  return parsed
+    .filter(p => goalIds.has(p.id) && validStatuses.includes(p.status))
+    .map(p => ({
+      node_id: p.id,
+      status: p.status as GoalMatch["status"],
+      confidence: typeof p.confidence === "number" ? p.confidence : 0.5,
+    }));
+}
+
+function matchGoalsDeterministic(
+  decision: string,
+  goals: Array<{ node_id: string; content: string }>,
+): GoalMatch[] {
+  const MATCH_THRESHOLD = 0.12;
+  const sentences = splitIntoSentences(decision);
+  const fullTokens = expandSynonyms(tokenize(decision));
+  const sentenceTokenSets = sentences.map(s => expandSynonyms(tokenize(s)));
+  const results: GoalMatch[] = [];
+
+  for (const goal of goals) {
+    const goalTokens = expandSynonyms(tokenize(goal.content));
+    const score = bestMatchScore(fullTokens, sentenceTokenSets, goalTokens);
+    if (score >= MATCH_THRESHOLD) {
+      results.push({
+        node_id: goal.node_id,
+        status: score >= 0.3 ? "fully_resolved" : "partially_resolved",
+        confidence: score,
+      });
+    }
+  }
+  return results;
 }
 
 const SYNONYMS: Record<string, string[]> = {
