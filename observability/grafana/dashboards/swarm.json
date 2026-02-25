@@ -17,7 +17,7 @@
       },
       "targets": [
         {
-          "expr": "rate(swarm_proposal_count_total[1m])",
+          "expr": "rate(swarm_swarm_proposal_count_total[1m])",
           "legendFormat": "{{result}} ({{type}})",
           "refId": "A"
         }
@@ -34,7 +34,7 @@
       },
       "targets": [
         {
-          "expr": "swarm_policy_violation_count_total",
+          "expr": "swarm_swarm_policy_violation_count_total",
           "legendFormat": "violations",
           "refId": "A"
         }
@@ -51,7 +51,7 @@
       },
       "targets": [
         {
-          "expr": "swarm_agent_error_count_total",
+          "expr": "swarm_swarm_agent_error_count_total",
           "legendFormat": "{{role}}",
           "refId": "A"
         }
@@ -68,7 +68,7 @@
       },
       "targets": [
         {
-          "expr": "rate(swarm_governance_loop_ms_sum[5m]) / rate(swarm_governance_loop_ms_count[5m])",
+          "expr": "rate(swarm_swarm_governance_loop_ms_sum[5m]) / rate(swarm_swarm_governance_loop_ms_count[5m])",
           "legendFormat": "avg",
           "refId": "A"
         }
@@ -85,7 +85,7 @@
       },
       "targets": [
         {
-          "expr": "rate(swarm_agent_latency_ms_sum[5m]) / rate(swarm_agent_latency_ms_count[5m])",
+          "expr": "rate(swarm_swarm_agent_latency_ms_milliseconds_sum[5m]) / rate(swarm_swarm_agent_latency_ms_milliseconds_count[5m])",
           "legendFormat": "{{role}} avg",
           "refId": "A"
         }
@@ -102,7 +102,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(swarm_agent_latency_ms_bucket[5m]))",
+          "expr": "histogram_quantile(0.95, rate(swarm_swarm_agent_latency_ms_milliseconds_bucket[5m]))",
           "legendFormat": "p95 {{role}}",
           "refId": "A"
         }
@@ -119,7 +119,7 @@
       },
       "targets": [
         {
-          "expr": "increase(swarm_proposal_count_total[1m])",
+          "expr": "increase(swarm_swarm_proposal_count_total[1m])",
           "legendFormat": "{{result}}",
           "refId": "A"
         }
@@ -136,7 +136,7 @@
       },
       "targets": [
         {
-          "expr": "swarm_agent_latency_ms_count",
+          "expr": "swarm_swarm_agent_latency_ms_milliseconds_count",
           "legendFormat": "{{role}}",
           "refId": "A"
         }
@@ -148,7 +148,7 @@
   "templating": {
     "list": [
       {
-        "current": { "selected": false, "text": "Prometheus", "value": "Prometheus" },
+        "current": { "selected": true, "text": "Prometheus", "value": "prometheus" },
         "hide": 0,
         "includeAll": false,
         "name": "DS_PROMETHEUS",

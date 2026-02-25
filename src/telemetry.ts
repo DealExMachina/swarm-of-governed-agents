@@ -16,14 +16,15 @@ let sdk: NodeSDK | null = null;
 export function initTelemetry(): void {
   if (process.env.OTEL_SDK_DISABLED === "true") return;
 
-  const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  const endpoint =
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT || "http://localhost:4318";
 
   const traceExporter = new OTLPTraceExporter({
-    url: endpoint ? `${endpoint}/v1/traces` : undefined,
+    url: `${endpoint.replace(/\/$/, "")}/v1/traces`,
   });
 
   const metricExporter = new OTLPMetricExporter({
-    url: endpoint ? `${endpoint}/v1/metrics` : undefined,
+    url: `${endpoint.replace(/\/$/, "")}/v1/metrics`,
   });
 
   const metricReader = new PeriodicExportingMetricReader({

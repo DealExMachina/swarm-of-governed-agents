@@ -94,6 +94,11 @@ function startSseProxy(): void {
       // #region agent log
       fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-server.ts:startSseProxy',message:'connected',data:{statusCode:res.statusCode,clients:sseClients.size},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
+      if (res.statusCode !== 200) {
+        res.resume();
+        res.on("end", () => setTimeout(startSseProxy, 3000));
+        return;
+      }
       let chunkCount = 0;
       res.on("data", (chunk: Buffer) => {
         const text = chunk.toString();
@@ -203,6 +208,25 @@ async function handleStep(n: number, res: ServerResponse): Promise<void> {
   }
 }
 
+/** POST /api/run-all — feed all documents at once for concurrent processing */
+async function handleRunAll(res: ServerResponse): Promise<void> {
+  const results: Array<{ index: number; title: string; ok: boolean; error?: string }> = [];
+  for (const doc of DEMO_DOCS) {
+    if (fedSteps.has(doc.index)) {
+      results.push({ index: doc.index, title: doc.title, ok: true });
+      continue;
+    }
+    try {
+      await proxyPost(`${FEED_URL}/context/docs`, { title: doc.title, body: doc.body });
+      fedSteps.add(doc.index);
+      results.push({ index: doc.index, title: doc.title, ok: true });
+    } catch (e) {
+      results.push({ index: doc.index, title: doc.title, ok: false, error: String(e) });
+    }
+  }
+  sendJson(res, 200, { ok: true, fed: results.length, results });
+}
+
 /** GET /api/summary — proxy to feed server */
 async function handleSummary(res: ServerResponse): Promise<void> {
   try {
@@ -210,6 +234,18 @@ async function handleSummary(res: ServerResponse): Promise<void> {
     sendJson(res, 200, data as Record<string, unknown>);
   } catch {
     sendJson(res, 502, { error: "feed_unavailable" });
+  }
+}
+
+/** GET /api/situation — watchdog situation summary with ranked questions */
+async function handleSituation(res: ServerResponse): Promise<void> {
+  try {
+    const { buildSituationSummary } = await import("../src/watchdog.js");
+    const scopeId = process.env.SCOPE_ID ?? "default";
+    const situation = await buildSituationSummary(scopeId);
+    sendJson(res, 200, situation);
+  } catch (e) {
+    sendJson(res, 500, { error: String(e) });
   }
 }
 
@@ -247,11 +283,11 @@ async function handleResolution(req: IncomingMessage, res: ServerResponse): Prom
   }
 }
 
-/** POST /api/reset — clear all swarm state for a fresh demo run */
+/** POST /api/reset — clear all swarm state (including finality decisions) for a fresh demo run */
 async function handleReset(res: ServerResponse): Promise<void> {
   const errors: string[] = [];
 
-  // 1. Clear Postgres tables
+  // 1. Clear Postgres tables (scope_finality_decisions so scope is no longer RESOLVED and HITL can trigger again)
   const dbUrl = process.env.DATABASE_URL;
   if (dbUrl) {
     const pool = new pg.Pool({ connectionString: dbUrl, max: 1 });
@@ -290,7 +326,7 @@ async function handleReset(res: ServerResponse): Promise<void> {
     for (const prefix of ["facts/", "drift/"]) {
       try {
         const list = await s3.send(new ListObjectsV2Command({ Bucket: s3Bucket, Prefix: prefix, MaxKeys: 1000 }));
-        const keys = (list.Contents ?? []).map(c => c.Key!).filter(Boolean);
+        const keys = (list.Contents ?? []).flatMap((c) => (c.Key != null ? [c.Key] : []));
         if (keys.length > 0) {
           await s3.send(new DeleteObjectsCommand({
             Bucket: s3Bucket,
@@ -379,6 +415,10 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
       .intro-title{background:linear-gradient(135deg,var(--accent),var(--purple));background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent}
     }
     .intro-sub{font-size:1rem;color:var(--muted);max-width:560px;line-height:1.7}
+    .intro-how{font-size:0.9375rem;color:var(--text);max-width:520px;line-height:1.6;margin:0}
+    .intro-prereq{padding:0.75rem 1rem;background:var(--amber-dim);border:1px solid var(--amber);border-radius:var(--radius);font-size:0.8125rem;max-width:480px}
+    .intro-prereq a{color:var(--accent);text-decoration:underline}
+    .intro-prereq a:hover{color:var(--purple)}
     .intro-actions{display:flex;gap:0.75rem;margin-top:0.5rem;align-items:center}
     .begin-btn{padding:0.75rem 2.5rem;font-size:1rem;font-weight:700;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;font-family:var(--font);transition:filter .15s}
     .begin-btn:hover{filter:brightness(1.1)}
@@ -386,6 +426,8 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     .reset-btn:hover{color:var(--red);border-color:var(--red)}
     .reset-btn:disabled{opacity:0.5;cursor:not-allowed}
     .reset-msg{font-size:0.75rem;color:var(--green);min-height:1.2em;margin-top:0.25rem}
+    .intro-resolved-hint{margin-top:0.75rem;padding:0.5rem 0.75rem;font-size:0.8125rem;background:rgba(234,179,8,0.15);border:1px solid var(--amber);border-radius:var(--radius);color:var(--text)}
+    .intro-resolved-hint.hidden{display:none}
     .svc-status{display:flex;align-items:center;gap:0.5rem;margin-top:0.75rem;font-size:0.8125rem;color:var(--muted)}
     .svc-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
     .svc-dot.checking{background:var(--muted);animation:pulse 1s infinite}
@@ -395,6 +437,8 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
 
     /* Topbar */
     .topbar{display:flex;align-items:center;justify-content:space-between;padding:0 1.25rem;height:48px;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0}
+    .topbar-link{font-size:0.75rem;color:var(--muted);text-decoration:none;padding:0.25rem 0.625rem;border:1px solid var(--border);border-radius:var(--radius);transition:color .15s,border-color .15s}
+    .topbar-link:hover{color:var(--accent);border-color:var(--accent)}
     .topbar-left{display:flex;align-items:center;gap:0.75rem}
     .brand{font-size:0.875rem;font-weight:700;color:var(--text)}
     .brand-sub{font-size:0.75rem;color:var(--muted)}
@@ -467,6 +511,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     .step-summary{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:0.75rem 0.9rem;border-left:3px solid var(--accent);animation:fadeIn .3s ease}
     .step-summary-title{font-size:0.6875rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);margin-bottom:0.3rem}
     .step-summary-body{font-size:0.8125rem;color:var(--text);line-height:1.6}
+    .step-separator{margin:1.25rem 0 0.75rem;padding:0.35rem 0;font-size:0.6875rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);border-top:1px solid var(--border)}
 
     /* HITL panel */
     .hitl-panel{animation:fadeIn .4s ease}
@@ -650,18 +695,25 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
 <div class="intro-overlay" id="introOverlay">
   <div class="intro-title">Project Horizon</div>
   <div class="intro-sub">
-    Watch a governed agent swarm process five M&amp;A due diligence documents.
-    See how agents extract facts, detect contradictions, and why the system
-    requests human judgment when it reaches the limits of autonomous resolution.
+    Watch a governed agent swarm process five M&amp;A due diligence documents concurrently.
+    Agents extract facts, detect drift, plan actions, and advance a shared state graph &mdash;
+    all governed by policy. The system requests human judgment when it reaches the limits of autonomous resolution.
+  </div>
+  <p class="intro-how"><strong>Run All</strong> feeds all 5 documents at once. Agents process them concurrently on a shared state graph through governance. <strong>Step by Step</strong> feeds one at a time.</p>
+  <div class="intro-prereq">
+    <strong>Prerequisite:</strong> run <code>pnpm run feed</code> (port 3002), then <code>npm run swarm:all</code> in another terminal.
+    Open the <a href="http://localhost:3002" target="_blank" rel="noopener">observability dashboard</a> in another tab to see live events and KPIs alongside this demo.
   </div>
   <div class="svc-status" id="svcStatus">
     <div class="svc-dot checking" id="svcDot"></div>
     <span id="svcText">Checking services...</span>
   </div>
   <div class="intro-actions">
-    <button class="begin-btn" id="beginBtn" onclick="beginDemo()" disabled>Begin</button>
+    <button class="begin-btn" id="runAllBtn" onclick="runAllDemo()" disabled style="background:var(--green)">Run All (concurrent)</button>
+    <button class="begin-btn" id="beginBtn" onclick="beginDemo()" disabled style="background:var(--accent)">Step by Step</button>
     <button class="reset-btn" id="resetBtn" onclick="resetDemo()">Reset state</button>
   </div>
+  <div class="intro-resolved-hint hidden" id="introResolvedHint">Scope is already <strong>RESOLVED</strong> from a previous run. Human Decision will not appear until you click <strong>Reset state</strong>, then <strong>Begin</strong>.</div>
   <div class="reset-msg" id="resetMsg"></div>
 </div>
 
@@ -672,6 +724,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     <span class="brand-sub">&nbsp;&middot;&nbsp;Governed Swarm Demo</span>
   </div>
   <div style="display:flex;align-items:center;gap:0.75rem">
+    <a href="http://localhost:3002" target="_blank" rel="noopener" class="topbar-link">Observability (3002)</a>
     <div id="statusPill" class="status-pill pill-idle">
       <div class="pill-dot"></div>
       <span id="statusText">Ready</span>
@@ -699,10 +752,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
       <span class="stage-label" id="stageLabel"></span>
     </div>
     <div class="stage" id="stage">
-      <div class="stage-initial">
-        <p><strong>Click Begin</strong> to start. The demo feeds 5 documents to the swarm one by one. You will see each agent process them in real time.</p>
-        <div class="prereq"><strong>Prerequisite:</strong> run <code>npm run swarm:all</code> in another terminal so agents can process documents.</div>
-      </div>
+      <div class="stage-initial"><p>Click Begin above to start the demo.</p></div>
     </div>
   </div>
 
@@ -741,7 +791,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
         <div class="dim-row">
           <div class="dim-head"><span class="dim-name">Goal completion</span><span class="dim-val" id="dGoal">--</span></div>
           <div class="dim-bar"><div class="dim-fill purple" id="dGoalBar"></div></div>
-          <div class="dim-hint">Due diligence goals with a recorded resolution. Need 90% for auto-close.</div>
+          <div class="dim-hint">Due diligence goals with a recorded resolution. 0% = goals exist but none resolved yet; 100% when no goals or all resolved. Need 90% for auto-close.</div>
         </div>
         <div class="dim-row">
           <div class="dim-head"><span class="dim-name">Risk score</span><span class="dim-val" id="dRisk">--</span></div>
@@ -763,13 +813,13 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
       <div class="r-section" id="situationSection">
         <div class="r-label">Situation</div>
         <div id="situationPanel">
-          <details class="situation-group" id="situation-claims" open>
-            <summary>Claims <span class="situation-group-count" id="situation-claims-count">0</span></summary>
-            <div class="situation-cards" id="situation-claims-cards"></div>
-          </details>
-          <details class="situation-group" id="situation-goals">
+          <details class="situation-group" id="situation-goals" open>
             <summary>Goals <span class="situation-group-count" id="situation-goals-count">0</span></summary>
             <div class="situation-cards" id="situation-goals-cards"></div>
+          </details>
+          <details class="situation-group" id="situation-claims">
+            <summary>Claims <span class="situation-group-count" id="situation-claims-count">0</span></summary>
+            <div class="situation-cards" id="situation-claims-cards"></div>
           </details>
           <details class="situation-group" id="situation-risks">
             <summary>Risks <span class="situation-group-count" id="situation-risks-count">0</span></summary>
@@ -828,6 +878,9 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
   var currentStep = -1;
   var stepSeen = {};
   var stepTimeout = null;
+  var stepHeartbeatInterval = null;
+  var stepWaitTickInterval = null;
+  var stepStartTime = 0;
   var lastSummary = null;
   var previousFacts = null;
   var initialPendingIds = new Set();
@@ -939,18 +992,29 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     span.textContent = text;
     _svcReady = (state === 'ok');
     var beginBtn = document.getElementById('beginBtn');
+    var runAllBtn = document.getElementById('runAllBtn');
     if (beginBtn) beginBtn.disabled = !_svcReady;
+    if (runAllBtn) runAllBtn.disabled = !_svcReady;
   }
 
   function checkServices() {
     setSvcState('checking', 'Checking services...');
+    var hintEl = document.getElementById('introResolvedHint');
+    if (hintEl) hintEl.classList.add('hidden');
     fetch('/api/summary', { signal: AbortSignal.timeout(4000) })
       .then(function(r) {
         if (r.ok) {
           setSvcState('ok', 'Feed server ready');
           if (_svcCheckTimer) { clearInterval(_svcCheckTimer); _svcCheckTimer = null; }
+          return r.json();
         } else {
           setSvcState('down', 'Feed server not responding (HTTP ' + r.status + ')');
+          return null;
+        }
+      })
+      .then(function(data) {
+        if (data && data.finality && data.finality.status === 'RESOLVED' && hintEl) {
+          hintEl.classList.remove('hidden');
         }
       })
       .catch(function() {
@@ -984,6 +1048,23 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
         msg.style.color = 'var(--green)';
         var warns = (data.errors || []);
         msg.textContent = 'State cleared.' + (warns.length ? ' (' + warns.length + ' warnings)' : '');
+        previousFacts = null;
+        lastSummary = null;
+        updateSituationPanel(null, null);
+        setDim('dClaim', 'dClaimBar', null);
+        setDim('dContra', 'dContraBar', null);
+        setDim('dGoal', 'dGoalBar', null);
+        setDim('dRisk', 'dRiskBar', null);
+        updateCount('cClaims', 0);
+        updateCount('cGoals', 0);
+        updateCount('cContra', 0);
+        updateCount('cRisks', 0);
+        document.getElementById('rScore').textContent = '0%';
+        document.getElementById('rTrackFill').style.width = '0%';
+        document.getElementById('rScoreSub').textContent = 'Waiting for data';
+        document.getElementById('driftBadge').textContent = 'None';
+        document.getElementById('driftBadge').className = 'drift-badge none';
+        refreshSummary();
       } else {
         msg.style.color = 'var(--red)';
         msg.textContent = 'Reset failed: ' + JSON.stringify(data.errors);
@@ -1001,6 +1082,14 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
   window.restartDemo = async function() {
     await resetDemo();
     demoActive = false;
+    _concurrentMode = false;
+    if (_summaryPollTimer) { clearInterval(_summaryPollTimer); _summaryPollTimer = null; }
+    _concurrentFactsCount = 0;
+    _concurrentDriftCount = 0;
+    _concurrentPlannerCount = 0;
+    _concurrentGovApproved = 0;
+    _concurrentGovRejected = 0;
+    _concurrentTransitions = 0;
     currentStep = -1;
     stepResults = [];
     previousFacts = null;
@@ -1015,10 +1104,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     setStageLabel('');
     clearStage();
     document.getElementById('stage').innerHTML =
-      '<div class="stage-initial">' +
-        '<p><strong>Click Begin</strong> to start. The demo feeds 5 documents to the swarm one by one. You will see each agent process them in real time.</p>' +
-        '<div class="prereq"><strong>Prerequisite:</strong> run <code>npm run swarm:all</code> in another terminal so agents can process documents.</div>' +
-      '</div>';
+      '<div class="stage-initial"><p>Click Begin above to start the demo.</p></div>';
     document.getElementById('timeline').innerHTML = '';
     buildTimeline();
     document.getElementById('tlProgress').textContent = 'Step 0 / 5';
@@ -1058,6 +1144,68 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     feedNextStep();
   };
 
+  // ── Run All (concurrent) ──
+  var _concurrentMode = false;
+  var _summaryPollTimer = null;
+
+  window.runAllDemo = async function() {
+    if (!_svcReady) return;
+    _concurrentMode = true;
+    var runAllBtn = document.getElementById('runAllBtn');
+    var beginBtn = document.getElementById('beginBtn');
+    runAllBtn.disabled = true;
+    beginBtn.disabled = true;
+    if (_svcCheckTimer) { clearInterval(_svcCheckTimer); _svcCheckTimer = null; }
+
+    document.getElementById('introOverlay').classList.add('hidden');
+    demoActive = true;
+
+    setStatus('running', 'Feeding all documents...');
+    setStageLabel('Concurrent Processing');
+    clearStage();
+    appendToStage(
+      '<div class="doc-card">' +
+        '<div class="doc-card-head"><div><div class="doc-card-title">Concurrent Run</div><div class="doc-card-role">All 5 documents fed at once</div></div>' +
+          '<div class="doc-card-status feeding" id="concurrent-status"><div class="pill-dot" style="background:var(--accent);animation:pulse 1s infinite"></div> Feeding...</div>' +
+        '</div>' +
+        '<div class="doc-card-body">All five M&amp;A due diligence documents are being injected simultaneously. Agents (facts, drift, planner, status) will process them concurrently on the shared state graph. Governance evaluates every proposal.</div>' +
+      '</div>'
+    );
+
+    STEPS.forEach(function(s, i) { setTlState(i, 'active'); });
+
+    try {
+      var r = await fetch('/api/run-all', { method: 'POST' });
+      var data = await r.json();
+      if (data.ok) {
+        var statusEl = document.getElementById('concurrent-status');
+        if (statusEl) {
+          statusEl.className = 'doc-card-status feeding';
+          statusEl.innerHTML = '<div class="pill-dot" style="background:var(--accent);animation:pulse 1s infinite"></div> ' + data.fed + ' docs fed. Agents working...';
+        }
+        addActivity('All ' + data.fed + ' documents fed to swarm', 'doc');
+        data.results.forEach(function(d) {
+          addActivity('Fed: ' + d.title, 'doc');
+        });
+      }
+    } catch(e) {
+      showError('Could not feed documents: ' + e);
+      return;
+    }
+
+    setStatus('running', 'Agents processing concurrently...');
+    stepStartTime = Date.now();
+
+    _summaryPollTimer = setInterval(async function() {
+      await refreshSummary();
+      var sec = Math.floor((Date.now() - stepStartTime) / 1000);
+      var epoch = (lastSummary && lastSummary.state) ? lastSummary.state.epoch : 0;
+      document.getElementById('statusText').textContent = 'Agents working... epoch ' + epoch + ' (' + sec + 's)';
+    }, 3000);
+
+    startStepTimeout();
+  };
+
   // ── Step flow ──
   function feedNextStep() {
     currentStep++;
@@ -1069,19 +1217,23 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
   }
 
   async function startStep(idx) {
+    clearStepProgressIntervals();
     var step = STEPS[idx];
     stepSeen = { facts: false, drift: false, planner: false, complete: false };
     setTlState(idx, 'active');
     setStageLabel('Step ' + (idx + 1) + ' of 5');
     document.getElementById('tlProgress').textContent = 'Step ' + (idx + 1) + ' / 5';
     setStatus('running', 'Step ' + (idx + 1) + ' — ' + step.title);
-    clearStage();
+    // Do not clear stage: keep all previous steps visible so the user sees the full timeline.
+    if (idx > 0) {
+      appendToStage('<div class="step-separator" aria-hidden="true">Step ' + (idx + 1) + '</div>');
+    }
 
     appendToStage(
       '<div class="doc-card">' +
         '<div class="doc-card-head">' +
           '<div><div class="doc-card-title">' + escHtml(step.title) + '</div><div class="doc-card-role">' + escHtml(step.role) + '</div></div>' +
-          '<div class="doc-card-status feeding"><div class="pill-dot" style="background:var(--accent);animation:pulse 1s infinite"></div> Feeding to swarm</div>' +
+          '<div class="doc-card-status feeding" id="step-status-' + idx + '"><div class="pill-dot" style="background:var(--accent);animation:pulse 1s infinite"></div> Feeding to swarm</div>' +
         '</div>' +
         '<div class="doc-card-body">' + escHtml(step.insight) + '</div>' +
       '</div>'
@@ -1099,6 +1251,24 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
       return;
     }
 
+    var statusEl = document.getElementById('step-status-' + idx);
+    if (statusEl) {
+      statusEl.className = 'doc-card-status feeding';
+      statusEl.innerHTML = '<div class="pill-dot" style="background:var(--accent);animation:pulse 1s infinite"></div> Processing… waiting for agents (1–3 min). Ensure feed (3002) and <code>pnpm run swarm:all</code> are running.';
+    }
+    setStatus('running', 'Step ' + (idx + 1) + ' — Processing…');
+    stepStartTime = Date.now();
+    clearStepProgressIntervals();
+    stepHeartbeatInterval = setInterval(function() {
+      if (stepSeen.complete) return;
+      addActivity('Still processing… (agents may take 1–3 min per document)', 'state');
+    }, 20000);
+    stepWaitTickInterval = setInterval(function() {
+      if (stepSeen.complete) return;
+      var sec = Math.floor((Date.now() - stepStartTime) / 1000);
+      document.getElementById('statusText').textContent = 'Step ' + (idx + 1) + ' — Processing… (' + sec + ' s)';
+    }, 5000);
+
     addActivity('Document fed: ' + step.title, 'doc');
     startStepTimeout();
   }
@@ -1108,6 +1278,11 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     stepTimeout = setTimeout(function() {
       if (!stepSeen.complete) showTimeout();
     }, 300000);
+  }
+
+  function clearStepProgressIntervals() {
+    if (stepHeartbeatInterval) { clearInterval(stepHeartbeatInterval); stepHeartbeatInterval = null; }
+    if (stepWaitTickInterval) { clearInterval(stepWaitTickInterval); stepWaitTickInterval = null; }
   }
 
   function resetStepTimeout() {
@@ -1134,12 +1309,206 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     };
   }
 
+  var _concurrentFactsCount = 0;
+  var _concurrentDriftCount = 0;
+  var _concurrentPlannerCount = 0;
+  var _concurrentGovApproved = 0;
+  var _concurrentGovRejected = 0;
+  var _concurrentTransitions = 0;
+
+  function handleConcurrentEvent(type, payload) {
+    if (type === 'facts_extracted') {
+      _concurrentFactsCount++;
+      var wrote = payload.wrote || [];
+      appendToStage(agentCardHtml('F', 'Facts Agent', 'Run #' + _concurrentFactsCount + ' — extracted ' + wrote.length + ' keys', 'accent'));
+      addActivity('Facts Agent: extraction #' + _concurrentFactsCount, 'facts');
+      refreshSummary();
+    }
+    if (type === 'drift_analyzed') {
+      _concurrentDriftCount++;
+      var level = (payload.level || 'none').toUpperCase();
+      var types = (payload.types || []).join(', ') || 'no types';
+      var color = level === 'HIGH' ? 'red' : level === 'MEDIUM' ? 'amber' : 'green';
+      appendToStage(agentCardHtml('D', 'Drift Agent', 'Run #' + _concurrentDriftCount + ' — ' + level + ' drift (' + types + ')', color));
+      addActivity('Drift Agent #' + _concurrentDriftCount + ': ' + level, 'drift');
+      refreshSummary();
+    }
+    if (type === 'actions_planned') {
+      _concurrentPlannerCount++;
+      var actions = (payload.actions || []).map(function(a) { return typeof a === 'string' ? a : (a.action || a.name || JSON.stringify(a)); }).join(', ') || 'none';
+      appendToStage(agentCardHtml('P', 'Planner Agent', 'Run #' + _concurrentPlannerCount + ' — ' + actions, 'purple'));
+      addActivity('Planner #' + _concurrentPlannerCount + ': ' + actions, 'planner');
+    }
+    if (type === 'proposal_approved') {
+      _concurrentGovApproved++;
+      var reason = (payload.reason || 'policy_passed').replace(/_/g, ' ');
+      appendToStage(agentCardHtml('G', 'Governance', 'Approved (#' + _concurrentGovApproved + '): ' + reason, 'green'));
+      addActivity('Governance approved #' + _concurrentGovApproved, 'gov');
+    }
+    if (type === 'proposal_rejected') {
+      _concurrentGovRejected++;
+      var rejReason = (payload.reason || 'rejected').replace(/_/g, ' ');
+      appendToStage(agentCardHtml('G', 'Governance', 'Rejected (#' + _concurrentGovRejected + '): ' + rejReason, 'amber'));
+      addActivity('Governance rejected #' + _concurrentGovRejected, 'gov');
+    }
+    if (type === 'state_transition') {
+      _concurrentTransitions++;
+      var from = payload.from || '?';
+      var to = payload.to || '?';
+      addActivity('State: ' + from + ' -> ' + to + ' (epoch ' + (payload.epoch || '?') + ')', 'state');
+      STEPS.forEach(function(s, i) {
+        if (_concurrentTransitions > i) setTlState(i, 'done');
+      });
+      refreshSummary();
+    }
+    if (type === 'proposal_pending_approval') {
+      addActivity('Governance: human review required', 'gov');
+      setTimeout(function() { pollGovernancePending(); }, 500);
+    }
+    if (type === 'status_briefing') {
+      addActivity('Status Agent: briefing updated', 'state');
+    }
+    if (type === 'watchdog_hitl') {
+      addActivity('Watchdog: human input needed (' + (payload.questions_count || '?') + ' questions)', 'hitl');
+      if (_summaryPollTimer) { clearInterval(_summaryPollTimer); _summaryPollTimer = null; }
+      setStatus('hitl', 'Human input needed');
+      loadSituationAndShow();
+    }
+  }
+
+  async function loadSituationAndShow() {
+    try {
+      var r = await fetch('/api/situation');
+      if (!r.ok) { checkForHitl(); return; }
+      var situation = await r.json();
+      showWatchdogPanel(situation);
+    } catch(e) {
+      checkForHitl();
+    }
+  }
+
+  function showWatchdogPanel(situation) {
+    var questions = situation.questions || [];
+    var gs = Math.round((situation.goal_score || 0) * 100);
+
+    var html = '<div class="hitl-panel">';
+
+    html += '<div class="hitl-section">';
+    html += '<div class="hitl-section-title">Situation Summary</div>';
+    html += '<div class="hitl-narrative">' + escHtml(situation.summary || '') + '</div>';
+    html += '</div>';
+
+    if (questions.length > 0) {
+      html += '<div class="hitl-section">';
+      html += '<div class="hitl-section-title">Questions for you (ranked by impact on finality)</div>';
+      html += '<div class="hitl-options">';
+      questions.forEach(function(q, i) {
+        var priorityColor = q.priority === 'critical' ? 'red' : q.priority === 'high' ? 'amber' : 'accent';
+        var gain = Math.round((q.potential_gain || 0) * 100);
+        html += '<div class="agent-card ' + priorityColor + '" style="cursor:default">';
+        html += '<div class="agent-icon ' + priorityColor + '">' + (i + 1) + '</div>';
+        html += '<div class="agent-card-content">';
+        html += '<div class="agent-card-name">' + escHtml(q.dimension.replace(/_/g, ' ')) + ' <span style="font-weight:400;color:var(--muted)">(+' + gain + '% potential)</span></div>';
+        html += '<div class="agent-card-msg" style="margin-top:4px">' + escHtml(q.question) + '</div>';
+        html += '</div></div>';
+      });
+      html += '</div></div>';
+
+      html += '<div class="hitl-section">';
+      html += '<div class="hitl-section-title">Your options</div>';
+      html += '<div class="hitl-options">';
+      html += '<button class="hitl-option" onclick="showResolutionInputWatchdog()">';
+      html += '<div class="hitl-option-name">Answer a question / provide resolution</div>';
+      html += '<div class="hitl-option-desc">Type a fact or decision to resolve one or more questions above. The swarm will re-process and update scores.</div></button>';
+      html += '<button class="hitl-option primary" onclick="approveFromWatchdog()">';
+      html += '<div class="hitl-option-name">Approve finality as-is (' + gs + '%)</div>';
+      html += '<div class="hitl-option-desc">Accept the current state. No further agent processing.</div></button>';
+      html += '</div></div>';
+
+      html += '<div id="watchdogResolutionArea" style="display:none"></div>';
+    }
+
+    html += '</div>';
+    showHitlModal(html, {
+      title: 'The Swarm Needs Your Input',
+      sub: gs + '% finality -- ' + questions.length + ' question(s) ranked by impact',
+      icon: '?',
+      iconColor: 'purple'
+    });
+  }
+
+  window.showResolutionInputWatchdog = function() {
+    var area = document.getElementById('watchdogResolutionArea');
+    if (!area) return;
+    area.style.display = 'block';
+    area.innerHTML =
+      '<div class="resolution-area">' +
+        '<div class="hitl-section-title">Provide resolution</div>' +
+        '<p style="font-size:0.8125rem;color:var(--muted);margin-bottom:0.5rem">Answer one or more questions above. The swarm will re-process.</p>' +
+        '<textarea id="watchdogResolutionText" placeholder="e.g. ARR confirmed at EUR 38M. Haber buyout approved at EUR 1M. Axion settlement at EUR 1.8M." rows="3"></textarea>' +
+        '<button class="resolution-submit" onclick="submitWatchdogResolution()">Submit resolution</button>' +
+      '</div>';
+  };
+
+  window.submitWatchdogResolution = async function() {
+    var text = (document.getElementById('watchdogResolutionText') || {}).value || '';
+    if (!text.trim()) return;
+    hideHitlModal();
+    setStatus('running', 'Agents re-processing with resolution...');
+    appendToStage(agentCardHtml('H', 'Human', 'Resolution: ' + text.slice(0, 80), 'purple'));
+    addActivity('Human resolution: ' + text.slice(0, 60), 'hitl');
+    try {
+      await fetch('/api/resolution', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision: text, summary: text.slice(0, 120), text: text }),
+      });
+      _concurrentMode = true;
+      stepStartTime = Date.now();
+      _summaryPollTimer = setInterval(async function() {
+        await refreshSummary();
+        var sec = Math.floor((Date.now() - stepStartTime) / 1000);
+        var epoch = (lastSummary && lastSummary.state) ? lastSummary.state.epoch : 0;
+        document.getElementById('statusText').textContent = 'Re-processing... epoch ' + epoch + ' (' + sec + 's)';
+      }, 3000);
+    } catch(e) {
+      showError('Could not submit resolution: ' + e);
+    }
+  };
+
+  window.approveFromWatchdog = async function() {
+    hideHitlModal();
+    try {
+      var pending = await fetch('/api/pending').then(function(r) { return r.json(); });
+      var items = (pending.pending || []).filter(function(p) {
+        var pl = (p.proposal || {}).payload || {};
+        return pl.type === 'finality_review';
+      });
+      if (items.length > 0) {
+        pendingProposalId = items[0].proposal_id;
+        await hitlDecide('approve_finality');
+      } else {
+        await fetch('/api/finality-response', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ proposal_id: 'watchdog-approve', option: 'approve_finality' }),
+        });
+        addActivity('Finality approved from watchdog', 'gov');
+        showFinalReport();
+      }
+    } catch(e) {
+      addActivity('Approve failed: ' + e, 'error');
+    }
+  };
+
   function handleEvent(evt) {
     var type = evt.type || '';
     var payload = evt.payload || {};
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-ui:handleEvent',message:'event-received',data:{type:type,payloadKeys:Object.keys(payload),currentStep:currentStep,stepSeen:stepSeen},timestamp:Date.now()})}).catch(function(){});
-    // #endregion
+
+    if (_concurrentMode) {
+      handleConcurrentEvent(type, payload);
+      return;
+    }
 
     if (type === 'facts_extracted' && !stepSeen.facts) {
       stepSeen.facts = true;
@@ -1189,6 +1558,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
 
       if (blocked && !stepSeen.complete) {
         stepSeen.complete = true;
+        clearStepProgressIntervals();
         if (stepTimeout) clearTimeout(stepTimeout);
         appendToStage(agentCardHtml('G', 'Governance', 'BLOCKED — policy rule triggered. ' + (payload.reason || ''), 'red'));
         addActivity('Governance: BLOCKED', 'gov');
@@ -1199,6 +1569,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
         setTimeout(function() { showStepSummary(); }, 1500);
       } else if (to === 'ContextIngested' && stepSeen.facts && !stepSeen.complete) {
         stepSeen.complete = true;
+        clearStepProgressIntervals();
         if (stepTimeout) clearTimeout(stepTimeout);
         appendToStage(agentCardHtml('G', 'Governance', 'Transition approved: ' + from + ' &rarr; ' + to, 'green'));
         addActivity('Governance: approved', 'gov');
@@ -1225,12 +1596,13 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     }
 
     if (type === 'proposal_pending_approval' && !stepSeen.complete) {
-      // #region agent log
-      fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-ui:handleEvent',message:'proposal_pending_approval',data:{payload:payload,currentStep:currentStep,stepSeen:stepSeen},timestamp:Date.now()})}).catch(function(){});
-      // #endregion
       addActivity('Governance: review required', 'gov');
       if (stepTimeout) clearTimeout(stepTimeout);
       setTimeout(function() { pollGovernancePending(); }, 500);
+    }
+    if (type === 'watchdog_hitl') {
+      addActivity('Watchdog: human input needed', 'hitl');
+      loadSituationAndShow();
     }
   }
 
@@ -1363,6 +1735,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
 
   // ── HITL check ──
   async function checkForHitl() {
+    if (_summaryPollTimer) { clearInterval(_summaryPollTimer); _summaryPollTimer = null; }
     setStatus('running', 'Evaluating finality...');
     setStageLabel('Checking finality');
     await refreshSummary();
@@ -1628,7 +2001,8 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     html += '<div class="report-header">';
     html += '<div class="report-icon">&#10003;</div>';
     html += '<div class="report-title">Scope ' + (fin.status === 'RESOLVED' ? 'Resolved' : 'Evaluated') + '</div>';
-    html += '<div class="report-sub">All five due diligence documents were processed by the governed agent swarm.</div>';
+    var modeLabel = _concurrentMode ? 'All five documents were processed concurrently by the governed agent swarm.' : 'All five due diligence documents were processed by the governed agent swarm.';
+    html += '<div class="report-sub">' + escHtml(modeLabel) + '</div>';
     html += '</div>';
 
     html += '<div class="situation-card">';
@@ -1727,6 +2101,14 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
   function updateSituationPanel(facts, prevFacts) {
     if (!facts || typeof facts !== 'object') {
       previousFacts = null;
+      document.getElementById('situation-claims-count').textContent = '0';
+      document.getElementById('situation-goals-count').textContent = '0';
+      document.getElementById('situation-risks-count').textContent = '0';
+      document.getElementById('situation-contradictions-count').textContent = '0';
+      document.getElementById('situation-claims-cards').innerHTML = '<div class="situation-empty">None yet</div>';
+      document.getElementById('situation-goals-cards').innerHTML = '<div class="situation-empty">None yet</div>';
+      document.getElementById('situation-risks-cards').innerHTML = '<div class="situation-empty">None yet</div>';
+      document.getElementById('situation-contradictions-cards').innerHTML = '<div class="situation-empty">None yet</div>';
       return;
     }
     var claims = Array.isArray(facts.claims) ? facts.claims : [];
@@ -1851,10 +2233,17 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
   }
 
   function showTimeout() {
+    if (_summaryPollTimer) { clearInterval(_summaryPollTimer); _summaryPollTimer = null; }
+    clearStepProgressIntervals();
     appendToStage(
-      '<div class="stage-error"><strong>Still processing...</strong>' +
-      'Local LLM inference can take several minutes per document. If the swarm is not running, start it: <code>npm run swarm:all</code>' +
-      '<p style="margin:0.5rem 0 0;color:var(--muted)">Events will appear as soon as agents complete their analysis.</p></div>'
+      '<div class="stage-error">' +
+      '<strong>Still processing — check these:</strong>' +
+      '<ul style="margin:0.5rem 0 0 1.25rem;color:var(--text);font-size:0.875rem;line-height:1.7">' +
+      '<li><strong>Feed server</strong> must be running (port 3002). Open <a href="http://localhost:3002" target="_blank" rel="noopener">http://localhost:3002</a> to confirm.</li>' +
+      '<li><strong>Swarm</strong> must be running: <code>pnpm run swarm:all</code> (agents + governance + executor).</li>' +
+      '<li>Facts extraction can take <strong>1–3 min</strong> per document (LLM call). Events will appear when agents finish.</li>' +
+      '</ul>' +
+      '<p style="margin:0.5rem 0 0;color:var(--muted)">If both are running, wait a bit longer or check swarm logs in <code>/tmp/swarm-*.log</code>.</p></div>'
     );
   }
 
@@ -1916,8 +2305,16 @@ async function main(): Promise<void> {
         await handleStep(parseInt(stepMatch[1], 10), res);
         return;
       }
+      if (req.method === "POST" && pathname === "/api/run-all") {
+        await handleRunAll(res);
+        return;
+      }
       if (req.method === "GET" && pathname === "/api/summary") {
         await handleSummary(res);
+        return;
+      }
+      if (req.method === "GET" && pathname === "/api/situation") {
+        await handleSituation(res);
         return;
       }
       if (req.method === "GET" && pathname === "/api/pending") {

@@ -689,6 +689,7 @@ async function runFinalityConsumerLoop(bus: EventBus, signal?: AbortSignal): Pro
 
 export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket: string, signal?: AbortSignal): Promise<void> {
   const { setMitlPublishFns, startMitlServer } = await import("../mitlServer.js");
+  const { startWatchdog } = await import("../watchdog.js");
   const mitlPort = parseInt(process.env.MITL_PORT ?? "3001", 10);
   setMitlPublishFns(
     (subj, data) => bus.publish(subj, data as Record<string, string>).then(() => {}),
@@ -697,6 +698,8 @@ export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket
   startMitlServer(mitlPort);
 
   void runFinalityConsumerLoop(bus, signal);
+
+  const { state: watchdogState } = startWatchdog(bus, signal);
 
   const subject = "swarm.proposals.>";
   const consumer = `governance-${AGENT_ID}`;
@@ -742,6 +745,7 @@ export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket
           }
         }
         await bus.publish("swarm.finality.evaluate", { scope_id: SCOPE_ID } as Record<string, string>);
+        watchdogState.lastProposalAt = Date.now();
         await markProcessed(consumer, msg.id);
       },
       { timeoutMs: 5000, maxMessages: 10 },

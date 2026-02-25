@@ -179,8 +179,12 @@ export async function makeEventBus(natsUrl?: string): Promise<EventBus> {
             m.ack();
             processed++;
           } catch (err) {
-            // Explicit NAK: tells NATS to redeliver (up to max_deliver times)
-            m.nak();
+            const nakDelayMs = (err as Error & { nakDelayMs?: number }).nakDelayMs;
+            if (typeof nakDelayMs === "number" && nakDelayMs > 0) {
+              (m as { nak: (ms?: number) => void }).nak(nakDelayMs);
+            } else {
+              m.nak();
+            }
             process.stderr.write(
               JSON.stringify({
                 ts: new Date().toISOString(),

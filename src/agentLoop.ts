@@ -97,6 +97,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       const activation = await checkFilter(config, memory, filterCtx);
       if (!activation.shouldActivate) {
         logger.info("filter rejected", { role, reason: activation.reason, ...activation.context });
+        // NAK with delay so NATS redelivers after cooldown; otherwise message would be acked and lost.
+        if (activation.reason.includes("cooldown")) {
+          const e = new Error(`filter_cooldown: ${activation.reason}`) as Error & { nakDelayMs?: number };
+          e.nakDelayMs = 2500; // slightly above default facts cooldown (2000ms)
+          throw e;
+        }
         return;
       }
       logger.info("filter activated", { role, reason: activation.reason });

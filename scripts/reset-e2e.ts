@@ -1,7 +1,8 @@
 /**
  * Reset DB, S3, and NATS to a clean state for E2E.
  * - Stops any running swarm processes (caller may run pkill before)
- * - Truncates Postgres: edges, nodes, context_events, swarm_state, filter_configs, agent_memory
+ * - Truncates Postgres: graph (edges, nodes), context, state, finality/decision tables, etc.
+ *   Includes scope_finality_decisions so the next run can trigger HITL again.
  * - Empties S3 bucket (all objects)
  * - Deletes NATS JetStream stream so it is recreated fresh
  *
@@ -20,6 +21,21 @@ const { Pool } = pg;
 const STREAM = process.env.NATS_STREAM ?? "SWARM_JOBS";
 const BUCKET = process.env.S3_BUCKET ?? "swarm";
 
+const TRUNCATE_TABLES = [
+  "context_events",
+  "swarm_state",
+  "edges",
+  "nodes",
+  "convergence_history",
+  "decision_records",
+  "finality_certificates",
+  "mitl_pending",
+  "scope_finality_decisions",
+  "processed_messages",
+  "agent_memory",
+  "filter_configs",
+];
+
 async function truncateDb(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) {
@@ -28,8 +44,16 @@ async function truncateDb(): Promise<void> {
   }
   const pool = new Pool({ connectionString: url, max: 1 });
   try {
-    await pool.query("TRUNCATE TABLE edges, nodes, context_events, swarm_state, filter_configs, agent_memory RESTART IDENTITY CASCADE");
-    console.log("Postgres: truncated edges, nodes, context_events, swarm_state, filter_configs, agent_memory");
+    const truncated: string[] = [];
+    for (const table of TRUNCATE_TABLES) {
+      try {
+        await pool.query(`TRUNCATE TABLE ${table} RESTART IDENTITY CASCADE`);
+        truncated.push(table);
+      } catch {
+        // table may not exist if only a subset of migrations was run
+      }
+    }
+    console.log("Postgres: truncated", truncated.length, "tables:", truncated.join(", "));
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes("does not exist")) {

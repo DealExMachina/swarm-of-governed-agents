@@ -5,6 +5,8 @@
 set -e
 cd "$(dirname "$0")/.."
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
+# So that Grafana gets metrics when docker compose (otel-collector, prometheus, grafana) is running
+export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4318}"
 # For local demo: allow feed/MITL without Bearer token (set DISABLE_FEED_AUTH=0 to require SWARM_API_TOKEN)
 export DISABLE_FEED_AUTH="${DISABLE_FEED_AUTH:-1}"
 # Facts-worker/LLM can take several minutes per document (e.g. Ollama); avoid client abort before worker finishes

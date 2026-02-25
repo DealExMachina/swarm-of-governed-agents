@@ -11,7 +11,7 @@ exporters:
     verbosity: basic
   prometheus:
     endpoint: 0.0.0.0:8889
-    namespace: swarm
+    # No namespace: app metrics already use swarm_* so dashboard queries match (swarm_proposal_count_total etc.)
 
 service:
   pipelines:

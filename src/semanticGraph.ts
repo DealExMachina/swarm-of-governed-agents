@@ -367,21 +367,6 @@ export async function loadFinalitySnapshot(scopeId: string): Promise<FinalitySna
   const row = nodeRes.rows[0] ?? {};
 
   const claimsCount = Number(row.claims_active_count ?? 0);
-  if (claimsCount === 0) {
-    const evidence_coverage = await getEvidenceCoverageForScope(scopeId, p);
-    return {
-      claims_active_min_confidence: 0,
-      claims_active_count: 0,
-      claims_active_avg_confidence: 0,
-      contradictions_unresolved_count: 0,
-      contradictions_total_count: 0,
-      risks_critical_active_count: 0,
-      goals_completion_ratio: 0,
-      scope_risk_score: 0,
-      contradiction_mass: 0,
-      evidence_coverage,
-    };
-  }
 
   const goalRes = await p.query(
     `SELECT
@@ -393,6 +378,22 @@ export async function loadFinalitySnapshot(scopeId: string): Promise<FinalitySna
   const goalRow = goalRes.rows[0] ?? {};
   const goalsTotal = Number(goalRow.total ?? 0);
   const goalsCompletionRatio = goalsTotal === 0 ? 1 : Number(goalRow.resolved ?? 0) / goalsTotal;
+
+  if (claimsCount === 0) {
+    const evidence_coverage = await getEvidenceCoverageForScope(scopeId, p);
+    return {
+      claims_active_min_confidence: 0,
+      claims_active_count: 0,
+      claims_active_avg_confidence: 0,
+      contradictions_unresolved_count: 0,
+      contradictions_total_count: 0,
+      risks_critical_active_count: 0,
+      goals_completion_ratio: goalsCompletionRatio,
+      scope_risk_score: 0,
+      contradiction_mass: 0,
+      evidence_coverage,
+    };
+  }
 
   const assessmentRes = await p.query(
     `SELECT COALESCE(SUM((metadata->>'risk_delta')::float), 0)::float AS risk_score

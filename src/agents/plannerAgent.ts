@@ -23,6 +23,9 @@ export async function runPlannerAgent(
 ): Promise<Record<string, unknown>> {
   const modelConfig = getChatModelConfig();
   if (modelConfig) {
+    const timeoutMs = Number(process.env.PLANNER_LLM_TIMEOUT_MS) || 60000;
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), timeoutMs);
     try {
       const readDrift = makeReadDriftTool(s3, bucket);
       const readFacts = makeReadFactsTool(s3, bucket);
@@ -36,8 +39,9 @@ export async function runPlannerAgent(
       });
       const result = await agent.generate(
         "Read drift, facts, and governance rules. Decide recommended actions and return JSON with actions array and reasoning.",
-        { maxSteps: 8 },
+        { maxSteps: 8, abortSignal: abortController.signal },
       );
+      clearTimeout(timeoutId);
       const text = result?.text ?? "";
       let actions: string[] = [];
       let reasoning = "";
@@ -57,9 +61,15 @@ export async function runPlannerAgent(
         : { level: "none", types: [] as string[] };
       return { drift: { level: drift.level, types: drift.types }, actions, reasoning };
     } catch (err) {
+      clearTimeout(timeoutId);
       const msg = err instanceof Error ? err.message : String(err);
-      if (/timeout|ECONNREFUSED|API|fetch failed/i.test(msg)) {
-        logger.warn("Mastra/OpenAI unreachable, falling back to rule-based planner", { error: msg });
+      const isAbort = err instanceof Error && (err as Error & { name?: string }).name === "AbortError";
+      const isRetryable = isAbort || /timeout|ECONNREFUSED|API|fetch failed|aborted/i.test(msg);
+      if (isRetryable) {
+        logger.warn("planner LLM unreachable or timeout, falling back to rule-based", {
+          error: msg,
+          ...(isAbort ? { hint: `LLM took longer than ${timeoutMs}ms. Set PLANNER_LLM_TIMEOUT_MS for heavy runs.` } : {}),
+        });
       } else {
         throw err;
       }
