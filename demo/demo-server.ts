@@ -422,6 +422,33 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     .stage-error strong{color:var(--red);display:block;margin-bottom:0.4rem}
     .stage-error code{background:var(--surface);padding:0.15rem 0.4rem;border-radius:4px;font-family:var(--mono);font-size:0.8rem}
 
+    /* End situation / knowledge at a glance */
+    .situation-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.1rem;margin-bottom:1rem;animation:fadeIn .3s ease}
+    .situation-card .situation-title{font-size:0.6875rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:0.5rem}
+    .situation-line{font-size:0.9375rem;color:var(--text);line-height:1.6;margin-bottom:0.75rem}
+    .situation-line strong{color:var(--text);font-weight:700}
+    .situation-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:0.5rem;margin-bottom:0.75rem}
+    .situation-stat{text-align:center;padding:0.5rem;background:var(--surface2);border-radius:6px;border:1px solid var(--border)}
+    .situation-stat-num{font-size:1.25rem;font-weight:800;color:var(--text);display:block;line-height:1.2}
+    .situation-stat-label{font-size:0.625rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-top:2px}
+    .situation-stat.claims .situation-stat-num{color:var(--accent)}
+    .situation-stat.goals .situation-stat-num{color:var(--purple)}
+    .situation-stat.contra .situation-stat-num{color:var(--amber)}
+    .situation-stat.risks .situation-stat-num{color:var(--red)}
+    .situation-drift{font-size:0.8125rem;color:var(--muted);margin-bottom:0.5rem}
+    .situation-drift strong{color:var(--text)}
+    .situation-goals-title{font-size:0.6875rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0.5rem 0 0.35rem}
+    .situation-goals-list{list-style:none;padding:0;margin:0;font-size:0.8125rem;color:var(--text);line-height:1.5}
+    .situation-goals-list li{padding:0.25rem 0;padding-left:1rem;position:relative}
+    .situation-goals-list li::before{content:'';position:absolute;left:0;top:0.55em;width:4px;height:4px;border-radius:50%;background:var(--purple)}
+    .statement-of-position{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.1rem 1.25rem;margin-bottom:1.25rem;border-left:4px solid var(--accent);animation:fadeIn .35s ease}
+    .statement-of-position .statement-title{font-size:0.6875rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);margin-bottom:0.6rem}
+    .statement-of-position .statement-body{font-size:0.9375rem;color:var(--text);line-height:1.7}
+    .statement-of-position .statement-body p{margin:0 0 0.6rem 0}
+    .statement-of-position .statement-body p:last-child{margin-bottom:0}
+    .statement-of-position .statement-resolutions{font-size:0.875rem;color:var(--text);margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--border)}
+    .statement-of-position .statement-resolutions strong{font-size:0.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+
     /* Final report */
     .report{animation:fadeIn .4s ease}
     .report-header{text-align:center;margin-bottom:1.5rem}
@@ -485,6 +512,24 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     .feed-item.gov .feed-item-msg{color:var(--green)}
     .feed-item.hitl .feed-item-msg{color:var(--purple)}
     .feed-item.error .feed-item-msg{color:var(--red)}
+
+    /* Situation: unfoldable groups and cards */
+    .situation-group{margin-bottom:0.5rem;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;background:var(--surface2)}
+    .situation-group summary{font-size:0.75rem;font-weight:600;color:var(--text);padding:0.5rem 0.65rem;cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;user-select:none}
+    .situation-group summary::-webkit-details-marker{display:none}
+    .situation-group summary::after{content:'';width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid var(--muted);margin-left:0.25rem;transition:transform .2s}
+    .situation-group[open] summary::after{transform:rotate(180deg)}
+    .situation-group-count{font-size:0.6875rem;color:var(--muted);font-weight:500}
+    .situation-cards{display:flex;flex-direction:column;gap:0.35rem;padding:0.5rem 0.65rem 0.65rem;border-top:1px solid var(--border)}
+    .situation-card{font-size:0.75rem;padding:0.4rem 0.55rem;border-radius:6px;border-left:3px solid;background:var(--surface);color:var(--text);line-height:1.4;cursor:default;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:background .15s}
+    .situation-card:hover{background:var(--border2)}
+    .situation-card.type-claim{border-left-color:var(--accent)}
+    .situation-card.type-goal{border-left-color:var(--purple)}
+    .situation-card.type-risk{border-left-color:var(--red)}
+    .situation-card.type-contradiction{border-left-color:var(--amber)}
+    .situation-card.situation-new{animation:fadeIn .35s ease}
+    .situation-card .situation-new-badge{font-size:0.5625rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--accent);margin-left:0.35rem}
+    .situation-empty{font-size:0.6875rem;color:var(--muted);padding:0.5rem 0.65rem;font-style:italic}
 
     @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
     ::-webkit-scrollbar{width:5px;height:5px} ::-webkit-scrollbar-track{background:transparent} ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:99px}
@@ -595,6 +640,28 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
         </div>
       </div>
 
+      <div class="r-section" id="situationSection">
+        <div class="r-label">Situation</div>
+        <div id="situationPanel">
+          <details class="situation-group" id="situation-claims" open>
+            <summary>Claims <span class="situation-group-count" id="situation-claims-count">0</span></summary>
+            <div class="situation-cards" id="situation-claims-cards"></div>
+          </details>
+          <details class="situation-group" id="situation-goals">
+            <summary>Goals <span class="situation-group-count" id="situation-goals-count">0</span></summary>
+            <div class="situation-cards" id="situation-goals-cards"></div>
+          </details>
+          <details class="situation-group" id="situation-risks">
+            <summary>Risks <span class="situation-group-count" id="situation-risks-count">0</span></summary>
+            <div class="situation-cards" id="situation-risks-cards"></div>
+          </details>
+          <details class="situation-group" id="situation-contradictions">
+            <summary>Contradictions <span class="situation-group-count" id="situation-contradictions-count">0</span></summary>
+            <div class="situation-cards" id="situation-contradictions-cards"></div>
+          </details>
+        </div>
+      </div>
+
       <div class="r-section">
         <div class="r-label">Drift</div>
         <div class="drift-badge none" id="driftBadge">None</div>
@@ -628,6 +695,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
   var stepSeen = {};
   var stepTimeout = null;
   var lastSummary = null;
+  var previousFacts = null;
   var initialPendingIds = new Set();
   var demoActive = false;
   var pendingProposalId = null;
@@ -760,7 +828,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
         return;
       }
     } catch(e) {
-      showError('Could not reach the demo server. Is the swarm running? Run npm run swarm:all');
+      showError('Could not reach the demo server or feed. Start the feed: pnpm run feed. Then run pnpm run swarm:all.');
       return;
     }
 
@@ -981,16 +1049,6 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     html += '</div>';
 
     html += '<div class="hitl-section">';
-    html += '<div class="hitl-section-title">Confidence breakdown</div>';
-    html += '<div class="hitl-dims">';
-    var dim = (lastSummary && lastSummary.finality && lastSummary.finality.dimensions) || {};
-    html += hitlDimRow('Claim confidence', dim.claim_avg_confidence, 'accent', 'How reliable are the extracted facts?');
-    html += hitlDimRow('Contradiction resolution', dim.contradiction_resolution_ratio, 'amber', 'Fraction of contradictions resolved.');
-    html += hitlDimRow('Goal completion', dim.goal_completion_ratio, 'purple', 'Goals with a recorded resolution.');
-    html += hitlDimRow('Risk score', dim.risk_score_inverse, 'red', 'Inverse of risk severity.');
-    html += '</div></div>';
-
-    html += '<div class="hitl-section">';
     html += '<div class="hitl-section-title">Your options</div>';
     html += '<div class="hitl-options">';
     html += '<button class="hitl-option primary" onclick="approveGovernance(&#39;' + escHtml(item.proposal_id) + '&#39;)">';
@@ -1112,17 +1170,35 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     }
     html += '</div>';
 
-    // Section 2: Confidence breakdown
+    // Knowledge state at review (clear end situation)
+    var sg2 = lastSummary && lastSummary.state_graph ? lastSummary.state_graph : {};
+    var nn2 = sg2.nodes || {};
+    var claims = nn2.claim || 0, goals = nn2.goal || 0, contra = nn2.contradiction || 0, risks = nn2.risk || 0;
+    var drift2 = lastSummary && lastSummary.drift ? lastSummary.drift : {};
+    var driftLevel2 = (drift2.level || 'none').toUpperCase();
+    var driftTypes2 = Array.isArray(drift2.types) ? drift2.types.join(', ') : '';
+    var goalsList = (lastSummary && lastSummary.facts && Array.isArray(lastSummary.facts.goals)) ? lastSummary.facts.goals : [];
     html += '<div class="hitl-section">';
-    html += '<div class="hitl-section-title">Confidence breakdown</div>';
-    html += '<div class="hitl-dims">';
-    html += hitlDimRow('Claim confidence', dim.claim_avg_confidence, 'accent', 'How reliable are the extracted facts?');
-    html += hitlDimRow('Contradiction resolution', dim.contradiction_resolution_ratio, 'amber', 'Fraction of contradictions resolved.');
-    html += hitlDimRow('Goal completion', dim.goal_completion_ratio, 'purple', 'Goals with a recorded resolution. Need 90% for auto-close.');
-    html += hitlDimRow('Risk score', dim.risk_score_inverse, 'red', 'Inverse of risk severity. Critical risks lower this.');
+    html += '<div class="situation-card">';
+    html += '<div class="situation-title">Knowledge state at review</div>';
+    html += '<div class="situation-line">At this point the swarm has extracted <strong>' + claims + '</strong> claims, <strong>' + goals + '</strong> goals, <strong>' + contra + '</strong> contradictions, and <strong>' + risks + '</strong> risks from the five documents.</div>';
+    html += '<div class="situation-grid">';
+    html += '<div class="situation-stat claims"><span class="situation-stat-num">' + claims + '</span><span class="situation-stat-label">Claims</span></div>';
+    html += '<div class="situation-stat goals"><span class="situation-stat-num">' + goals + '</span><span class="situation-stat-label">Goals</span></div>';
+    html += '<div class="situation-stat contra"><span class="situation-stat-num">' + contra + '</span><span class="situation-stat-label">Contradictions</span></div>';
+    html += '<div class="situation-stat risks"><span class="situation-stat-num">' + risks + '</span><span class="situation-stat-label">Risks</span></div>';
+    html += '</div>';
+    html += '<div class="situation-drift">Drift: <strong>' + escHtml(driftLevel2) + '</strong>' + (driftTypes2 ? ' (' + escHtml(driftTypes2) + ')' : '') + '</div>';
+    if (goalsList.length > 0) {
+      html += '<div class="situation-goals-title">Goals from documents</div>';
+      html += '<ul class="situation-goals-list">';
+      goalsList.slice(0, 8).forEach(function(g) { html += '<li>' + escHtml(typeof g === 'string' ? g : (g && g.text ? g.text : String(g))) + '</li>'; });
+      if (goalsList.length > 8) html += '<li style="color:var(--muted)">+ ' + (goalsList.length - 8) + ' more</li>';
+      html += '</ul>';
+    }
     html += '</div></div>';
 
-    // Section 3: Your options
+    // Section 2: Your options (confidence dimensions stay in right panel only)
     html += '<div class="hitl-section">';
     html += '<div class="hitl-section-title">Your options</div>';
     html += '<div class="hitl-options">';
@@ -1261,12 +1337,60 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     var dim = fin.dimension_breakdown || {};
     var gs = fin.goal_score != null ? Math.round(fin.goal_score * 100) : '--';
 
+    var factsReport = (lastSummary && lastSummary.facts) ? lastSummary.facts : null;
+    var goalsReport = factsReport && Array.isArray(factsReport.goals) ? factsReport.goals : [];
+    var driftReport = (lastSummary && lastSummary.drift) ? lastSummary.drift : {};
+    var driftLevelReport = (driftReport.level || 'none').toUpperCase();
+    var driftTypesReport = Array.isArray(driftReport.types) ? driftReport.types.join(', ') : '';
+
     var html = '<div class="report">';
     html += '<div class="report-header">';
     html += '<div class="report-icon">&#10003;</div>';
     html += '<div class="report-title">Scope ' + (fin.status === 'RESOLVED' ? 'Resolved' : 'Evaluated') + '</div>';
     html += '<div class="report-sub">All five due diligence documents were processed by the governed agent swarm.</div>';
     html += '</div>';
+
+    html += '<div class="situation-card">';
+    html += '<div class="situation-title">Outcome at close</div>';
+    html += '<div class="situation-line">The knowledge graph at resolution contains <strong>' + (nn.claim || 0) + '</strong> claims, <strong>' + (nn.goal || 0) + '</strong> goals, <strong>' + (nn.contradiction || 0) + '</strong> contradictions, and <strong>' + (nn.risk || 0) + '</strong> risks. Finality score <strong>' + gs + '%</strong>; drift at close: <strong>' + escHtml(driftLevelReport) + '</strong>' + (driftTypesReport ? ' (' + escHtml(driftTypesReport) + ')' : '') + '.</div>';
+    html += '<div class="situation-grid">';
+    html += '<div class="situation-stat claims"><span class="situation-stat-num">' + (nn.claim || 0) + '</span><span class="situation-stat-label">Claims</span></div>';
+    html += '<div class="situation-stat goals"><span class="situation-stat-num">' + (nn.goal || 0) + '</span><span class="situation-stat-label">Goals</span></div>';
+    html += '<div class="situation-stat contra"><span class="situation-stat-num">' + (nn.contradiction || 0) + '</span><span class="situation-stat-label">Contradictions</span></div>';
+    html += '<div class="situation-stat risks"><span class="situation-stat-num">' + (nn.risk || 0) + '</span><span class="situation-stat-label">Risks</span></div>';
+    html += '</div>';
+    if (goalsReport.length > 0) {
+      html += '<div class="situation-goals-title">Goals addressed</div>';
+      html += '<ul class="situation-goals-list">';
+      goalsReport.slice(0, 8).forEach(function(g) { html += '<li>' + escHtml(typeof g === 'string' ? g : (g && g.text ? g.text : String(g))) + '</li>'; });
+      if (goalsReport.length > 8) html += '<li style="color:var(--muted)">+ ' + (goalsReport.length - 8) + ' more</li>';
+      html += '</ul>';
+    }
+    html += '</div>';
+
+    // Human-understandable statement of the truth
+    var whatChanged = (lastSummary && Array.isArray(lastSummary.what_changed)) ? lastSummary.what_changed : [];
+    var resolutions = whatChanged.filter(function(ev) { return (ev.type || '') === 'resolution'; }).map(function(ev) {
+      var p = ev.payload || {};
+      return (p.decision || p.text || '').trim().slice(0, 200);
+    }).filter(Boolean);
+    var resolved = (fin.status || '') === 'RESOLVED';
+    var statementP1 = 'This scope is <strong>' + (resolved ? 'resolved' : 'evaluated') + '</strong>. After processing all five due diligence documents, the swarm\u2019s knowledge graph contains <strong>' + (nn.claim || 0) + ' claims</strong>, <strong>' + (nn.goal || 0) + ' goals</strong>, <strong>' + (nn.contradiction || 0) + ' contradictions</strong>, and <strong>' + (nn.risk || 0) + ' risks</strong>. Drift at close is <strong>' + escHtml(driftLevelReport) + '</strong>.';
+    if (resolved) statementP1 += ' A human reviewer approved this state as the resolved position.';
+    var statementP2 = '';
+    if (goalsReport.length > 0) {
+      var goalTexts = goalsReport.slice(0, 5).map(function(g) { return typeof g === 'string' ? g : (g && g.text ? g.text : String(g)); });
+      statementP2 = '<p>The position reflects the following objectives: ' + escHtml(goalTexts.join('; ')) + (goalsReport.length > 5 ? ' (and ' + (goalsReport.length - 5) + ' more).' : '.') + '</p>';
+    }
+    html += '<div class="statement-of-position">';
+    html += '<div class="statement-title">Statement of position</div>';
+    html += '<div class="statement-body"><p>' + statementP1 + '</p>' + statementP2;
+    if (resolutions.length > 0) {
+      html += '<div class="statement-resolutions"><strong>Human resolutions recorded</strong><br>';
+      resolutions.forEach(function(r) { html += '<span style="display:block;margin-top:0.35rem">\u201c' + escHtml(r) + (r.length >= 200 ? '\u2026' : '') + '\u201d</span>'; });
+      html += '</div>';
+    }
+    html += '</div></div>';
 
     html += '<div class="report-section">';
     html += '<div class="report-section-title">Summary</div>';
@@ -1317,6 +1441,48 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
 
   function dimPct(v) { return v != null ? Math.round(v * 100) + '%' : '--'; }
 
+  var TRUNCATE_LEN = 120;
+
+  function updateSituationPanel(facts, prevFacts) {
+    if (!facts || typeof facts !== 'object') {
+      previousFacts = null;
+      return;
+    }
+    var claims = Array.isArray(facts.claims) ? facts.claims : [];
+    var goals = Array.isArray(facts.goals) ? facts.goals : [];
+    var risks = Array.isArray(facts.risks) ? facts.risks : [];
+    var contradictions = Array.isArray(facts.contradictions) ? facts.contradictions : [];
+    var prevClaims = (prevFacts && Array.isArray(prevFacts.claims)) ? prevFacts.claims : [];
+    var prevGoals = (prevFacts && Array.isArray(prevFacts.goals)) ? prevFacts.goals : [];
+    var prevRisks = (prevFacts && Array.isArray(prevFacts.risks)) ? prevFacts.risks : [];
+    var prevContra = (prevFacts && Array.isArray(prevFacts.contradictions)) ? prevFacts.contradictions : [];
+
+    function renderCards(list, prevList, type) {
+      if (!list.length) return '<div class="situation-empty">None yet</div>';
+      var html = '';
+      for (var i = 0; i < list.length; i++) {
+        var text = String(list[i]).trim();
+        if (!text) continue;
+        var full = text;
+        var display = text.length > TRUNCATE_LEN ? text.slice(0, TRUNCATE_LEN) + '\u2026' : text;
+        var isNew = prevList.indexOf(text) === -1;
+        html += '<div class="situation-card type-' + type + (isNew ? ' situation-new' : '') + '" title="' + escHtml(full) + '">' + escHtml(display) + (isNew ? ' <span class="situation-new-badge">new</span>' : '') + '</div>';
+      }
+      return html || '<div class="situation-empty">None yet</div>';
+    }
+
+    document.getElementById('situation-claims-count').textContent = claims.length;
+    document.getElementById('situation-goals-count').textContent = goals.length;
+    document.getElementById('situation-risks-count').textContent = risks.length;
+    document.getElementById('situation-contradictions-count').textContent = contradictions.length;
+    document.getElementById('situation-claims-cards').innerHTML = renderCards(claims, prevClaims, 'claim');
+    document.getElementById('situation-goals-cards').innerHTML = renderCards(goals, prevGoals, 'goal');
+    document.getElementById('situation-risks-cards').innerHTML = renderCards(risks, prevRisks, 'risk');
+    document.getElementById('situation-contradictions-cards').innerHTML = renderCards(contradictions, prevContra, 'contradiction');
+
+    previousFacts = { claims: claims.slice(), goals: goals.slice(), risks: risks.slice(), contradictions: contradictions.slice() };
+  }
+
   // ── Summary refresh ──
   async function refreshSummary() {
     try {
@@ -1361,6 +1527,9 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     var badge = document.getElementById('driftBadge');
     badge.textContent = driftLevel.toUpperCase() || 'None';
     badge.className = 'drift-badge ' + driftLevel;
+
+    // Situation panel: claims, goals, risks, contradictions (unfoldable cards with hover)
+    updateSituationPanel(lastSummary.facts || null, previousFacts);
   }
 
   function setDim(valId, barId, value) {
@@ -1396,7 +1565,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     setStatus('error', 'Error');
     appendToStage(
       '<div class="stage-error"><strong>Something went wrong</strong>' + escHtml(msg) +
-      '<p style="margin:0.5rem 0 0">Run <code>npm run swarm:all</code> in another terminal, then refresh.</p></div>'
+      '<p style="margin:0.5rem 0 0">Ensure the feed server is running: <code>pnpm run feed</code>. Then run <code>pnpm run swarm:all</code> in another terminal so agents process documents. Refresh when both are up.</p></div>'
     );
   }
 

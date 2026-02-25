@@ -95,7 +95,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       const filterCtx = { s3, bucket };
       const activation = await checkFilter(config, memory, filterCtx);
       if (!activation.shouldActivate) {
-        logger.debug("filter rejected", { role, reason: activation.reason, ...activation.context });
+        logger.info("filter rejected", { role, reason: activation.reason, ...activation.context });
         return;
       }
       logger.info("filter activated", { role, reason: activation.reason });
@@ -146,7 +146,22 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       }
       await markProcessed(consumer, msg.id);
     } catch (err) {
-      logger.error("agent loop error", { role, error: toErrorString(err) });
+      const errMsg = toErrorString(err);
+      const isTimeoutOrConnect =
+        /timeout|TIMEOUT|abort|AbortError|The operation was aborted|fetch failed|ECONNREFUSED/i.test(errMsg) ||
+        (err instanceof Error && (err as Error & { name?: string }).name === "AbortError");
+      logger.error("agent loop error", {
+        role,
+        error: errMsg,
+        ...(isTimeoutOrConnect
+          ? { hint: "Worker/LLM timeout or unreachable. Set FACTS_WORKER_TIMEOUT_MS (e.g. 300000 for 5 min) for heavy steps; check FACTS_WORKER_URL and worker health." }
+          : {}),
+      });
+      // Rethrow transient errors so the event bus NAKs the message; NATS will redeliver (up to max_deliver).
+      // Ensures documents get processed when facts-worker or LLM becomes reachable again.
+      if (isTimeoutOrConnect) {
+        throw err;
+      }
     }
   }
 

@@ -20,6 +20,8 @@ import { evaluateFinality, computeGoalScoreForScope, loadFinalityConfig, loadFin
 import { getConvergenceState, type ConvergenceState } from "./convergenceTracker.js";
 import { getGraphSummary, appendResolutionGoal } from "./semanticGraph.js";
 import { getLatestFinalityDecision } from "./finalityDecisions.js";
+import { getGovernancePolicyVersion, getFinalityPolicyVersion } from "./policyVersions.js";
+import { getLatestCertificate } from "./finalityCertificates.js";
 import { requireBearer } from "./auth.js";
 
 // ── Persistent EventBus singleton ────────────────────────────────────────────
@@ -190,6 +192,33 @@ async function handleFinalityResponse(req: IncomingMessage, res: ServerResponse)
   }
 }
 
+/** Normalize S3 facts list fields to string[] (handles raw strings, dicts with claim/risk/goal/text, or arrays). */
+function toFactStringList(val: unknown): string[] {
+  if (val == null) return [];
+  if (Array.isArray(val)) {
+    return val
+      .map((item) => {
+        if (typeof item === "string") return item.trim() || null;
+        if (item && typeof item === "object" && !Array.isArray(item)) {
+          const obj = item as Record<string, unknown>;
+          const s =
+            (obj.claim as string) ??
+            (obj.risk as string) ??
+            (obj.goal as string) ??
+            (obj.assumption as string) ??
+            (obj.contradiction as string) ??
+            (obj.text as string) ??
+            (obj.entity as string);
+          if (typeof s === "string") return s.trim() || null;
+        }
+        return null;
+      })
+      .filter((s): s is string => typeof s === "string" && s.length > 0);
+  }
+  if (typeof val === "string") return val.trim() ? [val.trim()] : [];
+  return [];
+}
+
 /** GET /summary: state, facts summary, drift, and recent pipeline events for demo output. */
 async function handleSummary(res: ServerResponse): Promise<void> {
   try {
@@ -214,10 +243,14 @@ async function handleSummary(res: ServerResponse): Promise<void> {
         : null,
       facts: facts
         ? {
-            goals: facts.goals ?? [],
+            goals: toFactStringList(facts.goals),
+            claims: toFactStringList(facts.claims),
+            risks: toFactStringList(facts.risks),
+            contradictions: toFactStringList(facts.contradictions),
+            assumptions: toFactStringList(facts.assumptions),
             confidence: facts.confidence ?? null,
             hash: (facts as { hash?: string }).hash ?? null,
-            keys: Object.keys(facts).filter((k) => !["hash", "goals", "confidence"].includes(k)),
+            keys: Object.keys(facts).filter((k) => !["hash", "goals", "confidence", "claims", "risks", "contradictions", "assumptions"].includes(k)),
           }
         : null,
       drift: (() => {
@@ -272,6 +305,8 @@ async function handleSummary(res: ServerResponse): Promise<void> {
               lyapunov_v: convState.history.length > 0 ? convState.history[convState.history.length - 1].lyapunov_v : null,
               highest_pressure: convState.highest_pressure_dimension,
               is_monotonic: convState.is_monotonic,
+              trajectory_quality: convState.trajectory_quality,
+              oscillation_detected: convState.oscillation_detected,
               history: convState.history.map((p) => ({
                 epoch: p.epoch,
                 score: p.goal_score,
@@ -282,6 +317,25 @@ async function handleSummary(res: ServerResponse): Promise<void> {
             // convergence_history table may not exist
           }
 
+          let policy_version: { governance?: string; finality?: string } | undefined;
+          let finality_certificate: { decision: string; timestamp: string; has_jws: boolean } | null = null;
+          try {
+            policy_version = { governance: getGovernancePolicyVersion(), finality: getFinalityPolicyVersion() };
+          } catch {
+            // optional
+          }
+          try {
+            const cert = await getLatestCertificate(SCOPE_ID);
+            if (cert) {
+              finality_certificate = {
+                decision: cert.payload.decision,
+                timestamp: cert.payload.timestamp,
+                has_jws: !!cert.certificate_jws,
+              };
+            }
+          } catch {
+            // table may not exist
+          }
           return {
             goal_score: Math.round(goal_score * 100) / 100,
             status,
@@ -291,6 +345,8 @@ async function handleSummary(res: ServerResponse): Promise<void> {
             dimension_breakdown: result?.kind === "review" ? result.request.dimension_breakdown : null,
             blockers: result?.kind === "review" ? result.request.blockers : null,
             last_decision: last_decision ?? undefined,
+            policy_version: policy_version ?? undefined,
+            finality_certificate: finality_certificate ?? undefined,
             convergence,
             dimensions: await (async () => {
               try {
@@ -630,6 +686,15 @@ const INDEX_HTML = `<!DOCTYPE html>
               html += '<li>' + escapeHtml(b.type || '') + ': ' + escapeHtml(b.description || '') + '</li>';
             });
             html += '</ul></details>';
+          }
+          if (fin.policy_version && (fin.policy_version.governance || fin.policy_version.finality)) {
+            html += '<div class="label" style="margin-top: 0.5rem;">Policy version</div><div class="policy-version">governance: ' + (fin.policy_version.governance ? escapeHtml(String(fin.policy_version.governance).slice(0, 16)) + '…' : '—') + ' · finality: ' + (fin.policy_version.finality ? escapeHtml(String(fin.policy_version.finality).slice(0, 16)) + '…' : '—') + '</div>';
+          }
+          if (fin.finality_certificate) {
+            html += '<div class="label" style="margin-top: 0.5rem;">Finality certificate</div><div class="certificate-summary">' + escapeHtml(fin.finality_certificate.decision) + ' at ' + escapeHtml(String(fin.finality_certificate.timestamp).slice(0, 19)) + (fin.finality_certificate.has_jws ? ' (signed)' : '') + '</div>';
+          }
+          if (fin.convergence && (fin.convergence.trajectory_quality != null || fin.convergence.oscillation_detected != null)) {
+            html += '<div class="label" style="margin-top: 0.5rem;">Convergence (Gate C)</div><div class="convergence-eta">trajectory quality ' + (fin.convergence.trajectory_quality != null ? (fin.convergence.trajectory_quality * 100).toFixed(0) + '%' : '—') + (fin.convergence.oscillation_detected ? ' · oscillation detected' : '') + (fin.convergence.estimated_rounds != null ? ' · ETA ' + fin.convergence.estimated_rounds + ' rounds' : '') + '</div>';
           }
           html += '</div>';
         }
