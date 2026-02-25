@@ -323,7 +323,7 @@ async function handleReset(res: ServerResponse): Promise<void> {
         secretAccessKey: process.env.S3_SECRET_KEY ?? "minioadmin",
       },
     });
-    for (const prefix of ["facts/", "drift/"]) {
+    for (const prefix of ["facts/", "drift/", ""]) {
       try {
         const list = await s3.send(new ListObjectsV2Command({ Bucket: s3Bucket, Prefix: prefix, MaxKeys: 1000 }));
         const keys = (list.Contents ?? []).flatMap((c) => (c.Key != null ? [c.Key] : []));
@@ -334,7 +334,7 @@ async function handleReset(res: ServerResponse): Promise<void> {
           }));
         }
       } catch (e) {
-        errors.push(`s3(${prefix}): ${e}`);
+        errors.push(`s3(${prefix || "all"}): ${e}`);
       }
     }
     s3.destroy();
@@ -1083,6 +1083,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     await resetDemo();
     demoActive = false;
     _concurrentMode = false;
+    _hitlState.hitlTriggered = false;
     if (_summaryPollTimer) { clearInterval(_summaryPollTimer); _summaryPollTimer = null; }
     _concurrentFactsCount = 0;
     _concurrentDriftCount = 0;
@@ -1147,6 +1148,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
   // ── Run All (concurrent) ──
   var _concurrentMode = false;
   var _summaryPollTimer = null;
+  var _hitlState = { hitlTriggered: false };
 
   window.runAllDemo = async function() {
     if (!_svcReady) return;
@@ -1163,35 +1165,34 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     setStatus('running', 'Feeding all documents...');
     setStageLabel('Concurrent Processing');
     clearStage();
-    appendToStage(
-      '<div class="doc-card">' +
-        '<div class="doc-card-head"><div><div class="doc-card-title">Concurrent Run</div><div class="doc-card-role">All 5 documents fed at once</div></div>' +
-          '<div class="doc-card-status feeding" id="concurrent-status"><div class="pill-dot" style="background:var(--accent);animation:pulse 1s infinite"></div> Feeding...</div>' +
-        '</div>' +
-        '<div class="doc-card-body">All five M&amp;A due diligence documents are being injected simultaneously. Agents (facts, drift, planner, status) will process them concurrently on the shared state graph. Governance evaluates every proposal.</div>' +
-      '</div>'
-    );
 
     STEPS.forEach(function(s, i) { setTlState(i, 'active'); });
+    document.getElementById('tlProgress').textContent = 'All 5 docs';
 
     try {
       var r = await fetch('/api/run-all', { method: 'POST' });
       var data = await r.json();
       if (data.ok) {
-        var statusEl = document.getElementById('concurrent-status');
-        if (statusEl) {
-          statusEl.className = 'doc-card-status feeding';
-          statusEl.innerHTML = '<div class="pill-dot" style="background:var(--accent);animation:pulse 1s infinite"></div> ' + data.fed + ' docs fed. Agents working...';
-        }
         addActivity('All ' + data.fed + ' documents fed to swarm', 'doc');
-        data.results.forEach(function(d) {
-          addActivity('Fed: ' + d.title, 'doc');
+        data.results.forEach(function(d, i) {
+          appendToStage(
+            '<div class="doc-card" id="conc-doc-' + i + '">' +
+              '<div class="doc-card-head">' +
+                '<div><div class="doc-card-title">' + escHtml(d.title) + '</div><div class="doc-card-role">' + escHtml(STEPS[i] ? STEPS[i].role : '') + '</div></div>' +
+                '<div class="doc-card-status feeding" id="conc-doc-status-' + i + '"><div class="pill-dot" style="background:var(--accent);animation:pulse 1s infinite"></div> Queued</div>' +
+              '</div>' +
+              '<div class="doc-card-body">' + escHtml(STEPS[i] ? STEPS[i].insight : '') + '</div>' +
+            '</div>'
+          );
+          setTlResult(i, 'Fed to swarm', '', '');
         });
       }
     } catch(e) {
       showError('Could not feed documents: ' + e);
       return;
     }
+
+    appendToStage('<div class="step-separator">Agents processing concurrently</div>');
 
     setStatus('running', 'Agents processing concurrently...');
     stepStartTime = Date.now();
@@ -1202,7 +1203,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
       var epoch = (lastSummary && lastSummary.state) ? lastSummary.state.epoch : 0;
       document.getElementById('statusText').textContent = 'Agents working... epoch ' + epoch + ' (' + sec + 's)';
 
-      if (sec > 20 && !state.hitlTriggered) {
+      if (sec > 15 && !_hitlState.hitlTriggered) {
         try {
           var pr = await fetch('/api/pending');
           if (pr.ok) {
@@ -1212,7 +1213,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
               return pl.type === 'finality_review';
             });
             if (items.length > 0) {
-              state.hitlTriggered = true;
+              _hitlState.hitlTriggered = true;
               addActivity('Watchdog: finality review pending', 'hitl');
               loadSituationAndShow();
             }
@@ -1221,7 +1222,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
       }
     }, 3000);
 
-    var state = { hitlTriggered: false };
+    _hitlState.hitlTriggered = false;
     startStepTimeout();
   };
 
@@ -1375,9 +1376,19 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
       var from = payload.from || '?';
       var to = payload.to || '?';
       addActivity('State: ' + from + ' -> ' + to + ' (epoch ' + (payload.epoch || '?') + ')', 'state');
-      STEPS.forEach(function(s, i) {
-        if (_concurrentTransitions > i) setTlState(i, 'done');
-      });
+      var doneCount = Math.min(Math.floor(_concurrentTransitions / 3), STEPS.length);
+      for (var ti = 0; ti < STEPS.length; ti++) {
+        if (ti < doneCount) {
+          setTlState(ti, 'done');
+          setTlResult(ti, STEPS[ti].insight.split('.')[0], 'done', 'processed');
+          var statusEl = document.getElementById('conc-doc-status-' + ti);
+          if (statusEl && statusEl.textContent.indexOf('Done') === -1) {
+            statusEl.className = 'doc-card-status done';
+            statusEl.innerHTML = '&#10003; Done';
+          }
+        }
+      }
+      document.getElementById('tlProgress').textContent = doneCount + ' / 5 processed';
       refreshSummary();
     }
     if (type === 'proposal_pending_approval') {
@@ -1483,12 +1494,32 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
         body: JSON.stringify({ decision: text, summary: text.slice(0, 120), text: text }),
       });
       _concurrentMode = true;
+      _hitlState.hitlTriggered = false;
       stepStartTime = Date.now();
+      if (_summaryPollTimer) clearInterval(_summaryPollTimer);
       _summaryPollTimer = setInterval(async function() {
         await refreshSummary();
         var sec = Math.floor((Date.now() - stepStartTime) / 1000);
         var epoch = (lastSummary && lastSummary.state) ? lastSummary.state.epoch : 0;
         document.getElementById('statusText').textContent = 'Re-processing... epoch ' + epoch + ' (' + sec + 's)';
+
+        if (sec > 10 && !_hitlState.hitlTriggered) {
+          try {
+            var pr = await fetch('/api/pending');
+            if (pr.ok) {
+              var pd = await pr.json();
+              var items = (pd.pending || []).filter(function(p) {
+                var pl = (p.proposal || {}).payload || {};
+                return pl.type === 'finality_review';
+              });
+              if (items.length > 0) {
+                _hitlState.hitlTriggered = true;
+                addActivity('Watchdog: new review after re-processing', 'hitl');
+                loadSituationAndShow();
+              }
+            }
+          } catch(_) {}
+        }
       }, 3000);
     } catch(e) {
       showError('Could not submit resolution: ' + e);

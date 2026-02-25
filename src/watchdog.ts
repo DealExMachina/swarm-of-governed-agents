@@ -183,7 +183,18 @@ export function startWatchdog(
 
     const idleMs = Date.now() - state.lastProposalAt;
     if (idleMs < QUIESCENCE_THRESHOLD_MS) return;
-    if (state.hitlTriggered) return;
+
+    if (state.hitlTriggered) {
+      try {
+        const { hasPendingFinalityReviewForScope } = await import("./mitlServer.js");
+        const stillPending = await hasPendingFinalityReviewForScope(SCOPE_ID);
+        if (!stillPending) {
+          state.hitlTriggered = false;
+          logger.info("watchdog: previous HITL resolved, re-armed", { scope_id: SCOPE_ID });
+        }
+      } catch { /* ignore */ }
+      if (state.hitlTriggered) return;
+    }
 
     const sinceLast = Date.now() - state.lastFinalityCheckAt;
     if (sinceLast < QUIESCENCE_THRESHOLD_MS) return;
