@@ -23,12 +23,14 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
-from rlm_facts import extract_facts_and_drift
+from rlm_facts import extract_facts_and_drift, _get_model_info
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="facts-worker")
+
+_busy = False
 
 
 class ExtractReq(BaseModel):
@@ -36,8 +38,35 @@ class ExtractReq(BaseModel):
     previous_facts: Optional[Dict[str, Any]] = None
 
 
+@app.get("/health")
+def health():
+    model_name, backend = _get_model_info()
+    capabilities = ["extract"]
+    try:
+        from gliner2 import GLiNER2  # noqa: F401
+        if os.getenv("SKIP_GLINER", "1").lower() not in ("1", "true", "yes") and os.getenv("GLINER_MODEL", "").strip():
+            capabilities.append("ner")
+    except ImportError:
+        pass
+    try:
+        from sentence_transformers import CrossEncoder  # noqa: F401
+        if os.getenv("SKIP_NLI", "1").lower() not in ("1", "true", "yes") and os.getenv("NLI_MODEL", "").strip():
+            capabilities.append("nli")
+    except ImportError:
+        pass
+    return {
+        "status": "ok",
+        "model": model_name,
+        "backend": backend,
+        "capabilities": capabilities,
+        "busy": _busy,
+    }
+
+
 @app.post("/extract")
 def extract(req: ExtractReq):
+    global _busy
+    _busy = True
     try:
         facts, drift = extract_facts_and_drift(req.context, req.previous_facts)
         return {"facts": facts, "drift": drift}
@@ -49,3 +78,5 @@ def extract(req: ExtractReq):
             status_code=500,
             content={"error": msg, "detail": tb},
         )
+    finally:
+        _busy = False

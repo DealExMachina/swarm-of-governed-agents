@@ -1,9 +1,11 @@
 /**
- * OpenTelemetry setup and helpers for the swarm.
- * Import this at process entry (e.g. swarm.ts top) so the SDK is registered before other code runs.
+ * OpenTelemetry setup: traces + metrics for the swarm.
+ * Import at process entry (e.g. swarm.ts top) so the SDK is registered before other code runs.
  */
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
+import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { HttpInstrumentation } from "@opentelemetry/instrumentation-http";
 import { trace, metrics } from "@opentelemetry/api";
 
@@ -14,15 +16,25 @@ let sdk: NodeSDK | null = null;
 export function initTelemetry(): void {
   if (process.env.OTEL_SDK_DISABLED === "true") return;
 
+  const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+
   const traceExporter = new OTLPTraceExporter({
-    url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT
-      ? `${process.env.OTEL_EXPORTER_OTLP_ENDPOINT}/v1/traces`
-      : undefined,
+    url: endpoint ? `${endpoint}/v1/traces` : undefined,
+  });
+
+  const metricExporter = new OTLPMetricExporter({
+    url: endpoint ? `${endpoint}/v1/metrics` : undefined,
+  });
+
+  const metricReader = new PeriodicExportingMetricReader({
+    exporter: metricExporter,
+    exportIntervalMillis: 15000,
   });
 
   sdk = new NodeSDK({
     serviceName: SERVICE_NAME,
     traceExporter,
+    metricReader,
     instrumentations: [new HttpInstrumentation()],
   });
   sdk.start();
@@ -41,7 +53,6 @@ export function getTracer(_name: string = "swarm") {
   return trace.getTracer(SERVICE_NAME, "0.1.0");
 }
 
-/** Get the global meter for swarm metrics (requires OTEL_METRICS_EXPORTER or default OTLP). */
 export function getMeter(_name: string = "swarm") {
   return metrics.getMeter(SERVICE_NAME, "0.1.0");
 }

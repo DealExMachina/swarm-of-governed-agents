@@ -1,0 +1,8 @@
+-r requirements.txt
+dspy-ai==2.4.9
+# Ollama uses OpenAI-compatible API; no extra client needed.
+# NER + NLI (optional; worker runs without if unavailable)
+gliner2>=1.2.0
+transformers>=4.36.0
+torch>=2.0.0
+sentence-transformers>=2.2.0

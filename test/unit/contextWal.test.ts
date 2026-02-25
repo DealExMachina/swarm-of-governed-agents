@@ -15,6 +15,10 @@ function mockPool(overrides?: (text: string, values?: any[]) => any) {
         const result = overrides(text, values);
         if (result !== undefined) return result;
       }
+      // Table-existence check (ensureContextTable)
+      if (text.includes("information_schema") && text.includes("context_events")) {
+        return { rows: [{}], rowCount: 1 };
+      }
       if (text.includes("INSERT") && text.includes("RETURNING")) {
         return { rows: [{ seq: "42" }] };
       }
@@ -47,10 +51,12 @@ describe("contextWal", () => {
       const { pool, calls } = mockPool();
       await appendEvent({ x: 1 }, pool);
 
-      const createTable = calls.find((c) =>
-        c.text.includes("CREATE TABLE IF NOT EXISTS context_events"),
+      const tableCheck = calls.find(
+        (c) =>
+          c.text.includes("information_schema") &&
+          c.text.includes("context_events"),
       );
-      expect(createTable).toBeDefined();
+      expect(tableCheck).toBeDefined();
     });
   });
 

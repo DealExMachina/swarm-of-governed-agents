@@ -7,10 +7,10 @@ import { toErrorString } from "../errors.js";
 import { s3GetText, s3PutJson } from "../s3.js";
 import { tailEvents } from "../contextWal.js";
 
-/** Default 4 min: later demo steps (e.g. Market Intelligence) send large context; worker/LLM can be slow under load. */
+/** Default 5 min: local LLM (e.g. Ollama) can take several minutes per document; avoid client abort before worker finishes. */
 const FACTS_WORKER_TIMEOUT_MS = Math.max(
   15000,
-  parseInt(process.env.FACTS_WORKER_TIMEOUT_MS ?? "240000", 10) || 240000,
+  parseInt(process.env.FACTS_WORKER_TIMEOUT_MS ?? "300000", 10) || 300000,
 );
 
 function getFactsWorkerUrl(): string {
@@ -188,7 +188,7 @@ export async function runFactsPipelineDirect(
  * Run the facts extraction pipeline.
  *
  * Default path: direct pipeline (readContext -> worker /extract -> writeFacts).
- * The actual LLM work happens inside the Python facts-worker (DSPy / RLM),
+ * The actual LLM work happens inside the Python facts-worker (OpenAI SDK),
  * which uses OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL to call
  * chat/completions directly. No second LLM call is needed on the TypeScript
  * side for orchestration since the tool sequence is deterministic.

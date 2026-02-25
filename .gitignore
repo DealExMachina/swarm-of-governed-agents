@@ -19,3 +19,11 @@ venv/
 .vscode/
 .DS_Store
 *.log
+
+# LaTeX build artifacts (publication/)
+publication/*.aux
+publication/*.bbl
+publication/*.blg
+publication/*.log
+publication/*.out
+publication/*.synctex.gz

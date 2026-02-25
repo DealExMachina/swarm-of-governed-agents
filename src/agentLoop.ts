@@ -15,6 +15,7 @@ import { isProcessed, markProcessed } from "./messageDedup.js";
 import { createSwarmEvent } from "./events.js";
 import { toErrorString } from "./errors.js";
 import { logger } from "./logger.js";
+import { recordAgentLatency, recordAgentError } from "./metrics.js";
 import { runFactsAgent } from "./agents/factsAgent.js";
 import { runDriftAgent } from "./agents/driftAgent.js";
 import { runPlannerAgent } from "./agents/plannerAgent.js";
@@ -108,6 +109,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
 
       const result = await r(s3, bucket, activation.context as Record<string, unknown>);
       const latencyMs = Date.now() - startMs;
+      recordAgentLatency(role, latencyMs);
       await recordActivation(role, true, latencyMs);
 
       let payload: Record<string, unknown>;
@@ -146,6 +148,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       }
       await markProcessed(consumer, msg.id);
     } catch (err) {
+      recordAgentError(role);
       const errMsg = toErrorString(err);
       const isTimeoutOrConnect =
         /timeout|TIMEOUT|abort|AbortError|The operation was aborted|fetch failed|ECONNREFUSED/i.test(errMsg) ||

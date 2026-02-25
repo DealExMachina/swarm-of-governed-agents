@@ -9,11 +9,9 @@ receivers:
 exporters:
   debug:
     verbosity: basic
-  # Optional: uncomment to export to Jaeger
-  # otlp/jaeger:
-  #   endpoint: jaeger:4318
-  #   tls:
-  #     insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: swarm
 
 service:
   pipelines:
@@ -22,4 +20,4 @@ service:
       exporters: [debug]
     metrics:
       receivers: [otlp]
-      exporters: [debug]
+      exporters: [prometheus, debug]

@@ -7,8 +7,8 @@ import { getMeter } from "./telemetry.js";
 let proposalCount: ReturnType<ReturnType<typeof getMeter>["createCounter"]> | null = null;
 let policyViolationCount: ReturnType<ReturnType<typeof getMeter>["createCounter"]> | null = null;
 let agentLatencyHistogram: ReturnType<ReturnType<typeof getMeter>["createHistogram"]> | null = null;
-let taskResolutionTimeHistogram: ReturnType<ReturnType<typeof getMeter>["createHistogram"]> | null = null;
-let taskCostCounter: ReturnType<ReturnType<typeof getMeter>["createCounter"]> | null = null;
+let agentErrorCount: ReturnType<ReturnType<typeof getMeter>["createCounter"]> | null = null;
+let governanceLoopHistogram: ReturnType<ReturnType<typeof getMeter>["createHistogram"]> | null = null;
 
 function ensureInstruments() {
   const meter = getMeter();
@@ -30,16 +30,16 @@ function ensureInstruments() {
       unit: "ms",
     });
   }
-  if (taskResolutionTimeHistogram == null) {
-    taskResolutionTimeHistogram = meter.createHistogram("swarm.task.resolution_time_ms", {
-      description: "Task resolution time in milliseconds",
-      unit: "ms",
+  if (agentErrorCount == null) {
+    agentErrorCount = meter.createCounter("swarm.agent.error_count", {
+      description: "Agent errors by role",
+      unit: "1",
     });
   }
-  if (taskCostCounter == null) {
-    taskCostCounter = meter.createCounter("swarm.task.cost", {
-      description: "Estimated cost of tasks (e.g. LLM)",
-      unit: "1",
+  if (governanceLoopHistogram == null) {
+    governanceLoopHistogram = meter.createHistogram("swarm.governance.loop_ms", {
+      description: "Governance proposal handling latency",
+      unit: "ms",
     });
   }
 }
@@ -71,19 +71,19 @@ export function recordAgentLatency(role: string, latencyMs: number): void {
   }
 }
 
-export function recordTaskResolutionTimeMs(ms: number): void {
+export function recordAgentError(role: string): void {
   try {
     ensureInstruments();
-    taskResolutionTimeHistogram?.record(ms);
+    agentErrorCount?.add(1, { role });
   } catch {
     // no-op
   }
 }
 
-export function recordTaskCost(cost: number): void {
+export function recordGovernanceLoopMs(latencyMs: number): void {
   try {
     ensureInstruments();
-    taskCostCounter?.add(cost);
+    governanceLoopHistogram?.record(latencyMs);
   } catch {
     // no-op
   }
@@ -94,6 +94,6 @@ export function _resetSwarmMetrics(): void {
   proposalCount = null;
   policyViolationCount = null;
   agentLatencyHistogram = null;
-  taskResolutionTimeHistogram = null;
-  taskCostCounter = null;
+  agentErrorCount = null;
+  governanceLoopHistogram = null;
 }

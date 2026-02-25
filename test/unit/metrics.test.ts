@@ -3,8 +3,8 @@ import {
   recordProposal,
   recordPolicyViolation,
   recordAgentLatency,
-  recordTaskResolutionTimeMs,
-  recordTaskCost,
+  recordAgentError,
+  recordGovernanceLoopMs,
   _resetSwarmMetrics,
 } from "../../src/metrics.js";
 import { initTelemetry } from "../../src/telemetry.js";
@@ -31,11 +31,11 @@ describe("metrics", () => {
     expect(() => recordAgentLatency("governance", 50)).not.toThrow();
   });
 
-  it("recordTaskResolutionTimeMs does not throw", () => {
-    expect(() => recordTaskResolutionTimeMs(200)).not.toThrow();
+  it("recordAgentError does not throw", () => {
+    expect(() => recordAgentError("facts")).not.toThrow();
   });
 
-  it("recordTaskCost does not throw", () => {
-    expect(() => recordTaskCost(0.01)).not.toThrow();
+  it("recordGovernanceLoopMs does not throw", () => {
+    expect(() => recordGovernanceLoopMs(150)).not.toThrow();
   });
 });

@@ -2,11 +2,4 @@ fastapi==0.115.6
 uvicorn[standard]==0.30.6
 pydantic==2.10.6
 python-dotenv>=1.0.0
-dspy-ai==2.4.9
 openai>=1.55.0
-# Ollama uses OpenAI-compatible API; no extra client needed.
-# NER + NLI (optional; worker runs without if unavailable)
-gliner2>=1.2.0
-transformers>=4.36.0
-torch>=2.0.0
-sentence-transformers>=2.2.0

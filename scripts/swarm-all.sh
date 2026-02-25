@@ -7,6 +7,8 @@ cd "$(dirname "$0")/.."
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
 # For local demo: allow feed/MITL without Bearer token (set DISABLE_FEED_AUTH=0 to require SWARM_API_TOKEN)
 export DISABLE_FEED_AUTH="${DISABLE_FEED_AUTH:-1}"
+# Facts-worker/LLM can take several minutes per document (e.g. Ollama); avoid client abort before worker finishes
+export FACTS_WORKER_TIMEOUT_MS="${FACTS_WORKER_TIMEOUT_MS:-300000}"
 # Prefer pnpm when lockfile is pnpm (repo is pnpm-managed)
 if command -v pnpm >/dev/null 2>&1 && [ -f pnpm-lock.yaml ]; then RUNNER=pnpm; else RUNNER=npm; fi
 LOG_DIR="${LOG_DIR:-/tmp}"

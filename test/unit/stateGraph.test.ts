@@ -67,6 +67,10 @@ describe("stateGraph (Postgres-backed)", () => {
         const result = overrides(text, values);
         if (result !== undefined) return result;
       }
+      // Table-existence check (ensureStateTable)
+      if (text.includes("information_schema") && text.includes("swarm_state")) {
+        return { rows: [{}], rowCount: 1 };
+      }
       return { rows: [], rowCount: 0 };
     });
     // Mock client for runInTransaction (pool.connect() → client with query/release)

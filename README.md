@@ -116,7 +116,7 @@ This prototype runs one swarm with four agents against one scope. The architectu
 
 **Multiple agents per role.** Pull-consumer model on NATS means ten facts agents can work the same stream. Epoch-based CAS prevents double-advances.
 
-**Heterogeneous models.** The facts-worker is a pluggable Python service. Lighter models for low-stakes scopes, heavier ones for high-stakes — governance and finality stay constant.
+**Heterogeneous models.** The facts-worker is a pluggable Python service (OpenAI SDK). Lighter models for low-stakes scopes (e.g. `gpt-4o-mini`), heavier ones for high-stakes — governance and finality stay constant. GLiNER and NLI models are opt-in for advanced entity extraction.
 
 **Declarative scaling.** Adding complexity means adding rules to `governance.yaml`, updating weights in `finality.yaml`, adjusting the OpenFGA model. The agents remain unchanged.
 
@@ -143,18 +143,20 @@ pnpm run demo              # Demo UI on port 3003
 ./demo/run-demo.sh --fast  # Shell walkthrough
 ```
 
+The demo UI includes one-click **Reset state** and **Restart** buttons, a service readiness check that gates the start, and a full-screen **HITL modal** that pauses the demo when human decisions are required (governance interventions and finality review).
+
 See [docs/demo.md](docs/demo.md) for the full walkthrough and [demo/DEMO.md](demo/DEMO.md) for the complete step-by-step guide.
 
 ---
 
 ## Validation
 
-**268 unit tests** (Vitest) cover convergence math, finality decision paths, governance rule evaluation, semantic graph monotonicity, state machine CAS, policy engine, finality certificates, and Gate B/C/D. **7 convergence benchmark scenarios** validate the tracker with pure math (no Docker, no LLM). An **E2E pipeline** (`scripts/run-e2e.sh`) tests the full Docker stack from document ingestion through governance to semantic graph verification. **Governance path auditing** seeds three proposal modes (MASTER/MITL/YOLO) and verifies the audit trail.
+**283 tests** across 38 suites (Vitest) cover convergence math, finality decision paths, governance rule evaluation, semantic graph monotonicity, state machine CAS, policy engine, finality certificates, agent tools, and Gate B/C/D. **7 convergence benchmark scenarios** validate the tracker with pure math (no Docker, no LLM). An **E2E pipeline** (`scripts/run-e2e.sh`) tests the full Docker stack from document ingestion through governance to semantic graph verification. **Governance path auditing** seeds three proposal modes (MASTER/MITL/YOLO) and verifies the audit trail.
 
 **What's theoretical:** scalability beyond ~10 agents (architecture supports it, not stress-tested), multi-org OpenFGA isolation, long convergence runs over hundreds of epochs, adversarial robustness.
 
 ```bash
-pnpm run test                                  # 268 unit tests
+pnpm run test                                  # 283 tests across 38 suites
 npx tsx scripts/benchmark-convergence.ts       # 7 convergence scenarios
 ./scripts/run-e2e.sh                           # Full E2E pipeline
 ```
@@ -179,7 +181,7 @@ See [docs/validation.md](docs/validation.md) for the complete test methodology a
 
 **Finality:** After each governance round, `evaluateFinality(scopeId)` runs against the semantic graph and convergence history. Monotonicity gate + plateau detection + divergence detection.
 
-**Facts-worker:** Python (FastAPI + DSPy). Runs in Docker. Pluggable LLM backend (Ollama or OpenAI).
+**Facts-worker:** Python (FastAPI + OpenAI SDK). Runs in Docker. OpenAI by default; Ollama opt-in via `FACTS_WORKER_OLLAMA=1`.
 
 See [docs/architecture.md](docs/architecture.md) for the full technical deep dive.
 
@@ -188,24 +190,26 @@ See [docs/architecture.md](docs/architecture.md) for the full technical deep div
 ## Stack
 
 - **TypeScript** — orchestration, agents, state graph, convergence tracker, feed, tests.
-- **Python** — facts-worker (DSPy; Ollama or OpenAI-compatible extraction).
-- **Docker Compose** — Postgres (pgvector), MinIO, NATS JetStream, facts-worker, feed, OpenFGA, otel-collector.
+- **Python** — facts-worker (direct OpenAI SDK; OpenAI default, Ollama opt-in).
+- **Docker Compose** — Postgres (pgvector), MinIO (S3), NATS JetStream, facts-worker, feed server, OpenFGA, otel-collector, Prometheus, Grafana.
 - **NATS JetStream** — event bus.
 - **Postgres + pgvector** — context WAL, state graph, semantic graph with optional 1024-d embeddings, convergence history.
 - **MinIO** — S3-compatible blob store for facts, drift, and history.
 - **OpenFGA** — policy checks (Zanzibar-style; optional but wired in).
-- **Ollama or OpenAI** — extraction, rationale, HITL explanation, embeddings (`bge-m3`).
+- **Prometheus + Grafana** — metrics collection and dashboards (proposal counts, agent latency, policy violations).
+- **OpenTelemetry** — traces and metrics via OTLP to the collector; Prometheus scrape endpoint.
+- **OpenAI or Ollama** — extraction (facts-worker), rationale, HITL explanation, embeddings (`bge-m3` via Ollama).
 
 ---
 
 ## Run locally
 
-**Prerequisites:** Docker. Node 20+; pnpm (lockfile is `pnpm-lock.yaml`). OpenAI key or Ollama running locally with the extraction model pulled (e.g. `ollama pull qwen3:8b`).
+**Prerequisites:** Docker. Node 20+; pnpm (lockfile is `pnpm-lock.yaml`). OpenAI API key (set `OPENAI_API_KEY` in `.env`). Alternatively, Ollama running locally for facts extraction (set `FACTS_WORKER_OLLAMA=1` and pull the extraction model, e.g. `ollama pull qwen3:8b`).
 
 ```bash
 cp .env.example .env
 # Edit .env: set credentials and LLM config (see .env.example for all options)
-docker compose up -d postgres s3 nats facts-worker feed
+docker compose up -d
 pnpm install
 ```
 
@@ -267,7 +271,7 @@ curl -s -X POST http://localhost:3002/context/docs \
 ./scripts/run-e2e.sh
 ```
 
-**Ports:** 3002 feed · 4222/8222 NATS · 5433 Postgres · 9000/9001 MinIO · 8010 facts-worker · 3001 MITL (includes GET /finality-certificate/:scope_id) · 3000/8080 OpenFGA.
+**Ports:** 3002 observability + API · 3003 demo UI · 3004 Grafana · 9090 Prometheus · 4222/8222 NATS · 5433 Postgres · 9000/9001 MinIO · 8010 facts-worker · 3001 MITL · 3000/8080 OpenFGA · 4317/4318 OTLP · 8889 OTEL Prometheus scrape.
 
 ---
 
@@ -312,7 +316,7 @@ Set in `governance.yaml`:
 ## Tests
 
 ```bash
-pnpm run test          # 268 unit tests (Vitest); 15 integration tests (require Docker)
+pnpm run test          # 283 tests across 38 suites (Vitest); 4 integration suites (require Docker)
 pnpm run test:watch
 ```
 
@@ -335,7 +339,7 @@ pytest tests/ -v      # Python facts-worker unit + integration
 - **Embeddings:** Set `FACTS_SYNC_EMBED=1` + Ollama serving `bge-m3`. Claim nodes get 1024-d embeddings.
 - **Tuner agent:** `AGENT_ROLE=tuner pnpm run swarm` optimizes activation filter configs via LLM.
 - **Pressure-directed activation:** Set filter type to `pressure_directed` in agent config. Agents activate based on convergence pressure.
-- **Observability:** Configure `OTEL_*` in `.env` for traces and metrics.
+- **Observability:** `docker compose up -d` includes Prometheus (9090), Grafana (3004, anonymous read), and an OTEL collector. Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` in `.env` so agents export traces and metrics. The feed server on port 3002 serves an observability dashboard with live events, convergence, and service health. Grafana ships with a pre-provisioned "Swarm Governance" dashboard.
 - **Policy version and certificates:** Summary API (`GET /summary`) exposes `policy_version` (governance/finality config hashes) and `finality_certificate` when a scope has been resolved. MITL server exposes `GET /finality-certificate/:scope_id` for the latest signed certificate.
 - **OPA-WASM:** Build with `pnpm run build:opa` (requires OPA CLI); set `OPA_WASM_PATH` to use Rego policies instead of YAML. See `policies/README.md`.
 

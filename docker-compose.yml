@@ -64,30 +64,55 @@ services:
     ports:
       - "4317:4317"   # OTLP gRPC
       - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus scrape endpoint
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3004:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-swarm}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/swarm.json
+    depends_on:
+      - prometheus
 
   facts-worker:
     image: python:3.11-slim
     working_dir: /app
     volumes:
       - ./workers/facts-worker:/app
-    command: sh -c "pip install -r requirements.txt && uvicorn app:app --host 0.0.0.0 --port 8010"
+    command: sh -c "pip install -q -r requirements.txt && uvicorn app:app --host 0.0.0.0 --port 8010"
     ports:
       - "8010:8010"
     environment:
-      # In Docker, MinIO is the 's3' service (override .env localhost for host-run agents)
-      S3_ENDPOINT: http://s3:9000
-      S3_REGION: ${S3_REGION:-us-east-1}
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
-      S3_SECRET_KEY: ${S3_SECRET_KEY}
-      S3_BUCKET: ${S3_BUCKET}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
-      # Ollama on host. When OLLAMA_BASE_URL is set (e.g. in .env), use host.docker.internal in Docker (localhost in container = container itself).
-      # Set OLLAMA_BASE_URL= empty in .env to use OpenAI only for this service.
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:+http://host.docker.internal:11434}
+      # Ollama opt-in: set FACTS_WORKER_OLLAMA=1 in .env to route extraction through local Ollama.
+      # When empty (default), the worker uses the OpenAI API.
+      OLLAMA_BASE_URL: ${FACTS_WORKER_OLLAMA:+http://host.docker.internal:11434}
       EXTRACTION_MODEL: ${EXTRACTION_MODEL:-qwen3:8b}
-      HF_TOKEN: ${HF_TOKEN:-}
+      EXTRACTION_TIMEOUT_SEC: ${EXTRACTION_TIMEOUT_SEC:-180}
+      # NER/NLI disabled by default (slim image has no torch). Install requirements-full.txt and set models to enable.
+      SKIP_GLINER: ${SKIP_GLINER:-1}
+      SKIP_NLI: ${SKIP_NLI:-1}
       GLINER_MODEL: ${GLINER_MODEL:-}
       NLI_MODEL: ${NLI_MODEL:-}
 
@@ -121,3 +146,5 @@ volumes:
   postgres_data:
   nats_data:
   feed_node_modules:
+  prometheus_data:
+  grafana_data:

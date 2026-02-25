@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Swarm Observability</title>
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --surface: #13131a;
+      --surface2: #1a1a24;
+      --border: #252530;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --accent: #6366f1;
+      --green: #22c55e;
+      --yellow: #eab308;
+      --red: #ef4444;
+      --orange: #f97316;
+      --radius: 8px;
+      --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; }
+    body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.5; min-height: 100vh; }
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.75rem 1.5rem;
+      background: var(--surface); border-bottom: 1px solid var(--border);
+    }
+    .topbar h1 { font-size: 1rem; font-weight: 600; letter-spacing: -0.02em; }
+    .topbar .links { display: flex; gap: 0.75rem; align-items: center; }
+    .topbar .links a {
+      font-size: 0.75rem; color: var(--muted); text-decoration: none;
+      padding: 0.25rem 0.625rem; border: 1px solid var(--border); border-radius: var(--radius);
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .topbar .links a:hover { color: var(--text); border-color: var(--accent); }
+    .container { max-width: 1280px; margin: 0 auto; padding: 1.25rem; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-bottom: 1rem; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem; }
+    @media (max-width: 900px) { .grid-4 { grid-template-columns: repeat(2, 1fr); } .grid-2 { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 1rem;
+    }
+    .card .label { font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 0.375rem; }
+    .card .value { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .card .sub { font-size: 0.75rem; color: var(--muted); margin-top: 0.25rem; }
+    .card .value.ok { color: var(--green); }
+    .card .value.warn { color: var(--yellow); }
+    .card .value.err { color: var(--red); }
+    .card .value.info { color: var(--accent); }
+    .section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; margin-bottom: 1rem; }
+    .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; }
+    .section-header h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; }
+    .section-header .btn { font-size: 0.6875rem; padding: 0.25rem 0.625rem; background: var(--surface2); color: var(--muted); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; font-family: var(--font); }
+    .section-header .btn:hover { color: var(--text); border-color: var(--accent); }
+    .svc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.5rem; }
+    .svc-item {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.5rem 0.75rem; border-radius: var(--radius); background: var(--surface2);
+      font-size: 0.8125rem;
+    }
+    .svc-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .svc-dot.up { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .svc-dot.down { background: var(--red); box-shadow: 0 0 6px var(--red); }
+    .svc-dot.checking { background: var(--yellow); animation: pulse 1s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .convergence-bar { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.5rem; }
+    .conv-track { flex: 1; height: 8px; background: var(--surface2); border-radius: 4px; position: relative; overflow: hidden; }
+    .conv-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+    .conv-label { font-size: 0.75rem; color: var(--muted); min-width: 3rem; text-align: right; font-variant-numeric: tabular-nums; }
+    .dim-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8125rem; margin-top: 0.375rem; }
+    .dim-row .dim-name { width: 160px; color: var(--muted); flex-shrink: 0; }
+    .dim-row .dim-bar { flex: 1; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+    .dim-row .dim-fill { height: 100%; border-radius: 3px; }
+    .dim-row .dim-val { width: 3rem; text-align: right; font-variant-numeric: tabular-nums; font-size: 0.75rem; }
+    #events { list-style: none; padding: 0; max-height: 360px; overflow-y: auto; }
+    #events li {
+      padding: 0.5rem 0.75rem; margin: 2px 0; border-radius: 4px;
+      font-size: 0.75rem; font-family: var(--mono);
+      border-left: 3px solid var(--border); background: var(--surface2);
+    }
+    #events li .ts { color: var(--muted); margin-right: 0.5rem; }
+    #events li .type { font-weight: 600; color: var(--accent); }
+    #events li.state { border-left-color: #6366f1; }
+    #events li.facts { border-left-color: var(--green); }
+    #events li.drift { border-left-color: var(--yellow); }
+    #events li.proposal { border-left-color: var(--orange); }
+    #events li.context { border-left-color: var(--muted); }
+    #sseStatus { font-size: 0.6875rem; color: var(--muted); }
+    .badge { display: inline-block; padding: 0.125rem 0.375rem; border-radius: 4px; font-size: 0.6875rem; font-weight: 600; }
+    .badge.green { background: #16a34a22; color: var(--green); }
+    .badge.yellow { background: #eab30822; color: var(--yellow); }
+    .badge.red { background: #ef444422; color: var(--red); }
+    .badge.blue { background: #6366f122; color: var(--accent); }
+    .conv-extra { margin-top: 0.75rem; font-size: 0.75rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>Swarm Observability</h1>
+    <div class="links">
+      <a href="/summary?raw=1" target="_blank">API /summary</a>
+      <a href="/convergence?raw=1" target="_blank">API /convergence</a>
+      <a href="http://localhost:3004" target="_blank">Grafana</a>
+      <a href="http://localhost:9090" target="_blank">Prometheus</a>
+      <a href="http://localhost:3003" target="_blank">Demo UI</a>
+    </div>
+  </div>
+  <div class="container">
+    <div class="grid-4" id="kpiCards">
+      <div class="card"><div class="label">State</div><div class="value info" id="kpiState">--</div><div class="sub" id="kpiEpoch">epoch --</div></div>
+      <div class="card"><div class="label">Goal Score</div><div class="value" id="kpiGoal">--</div><div class="sub" id="kpiFinality">--</div></div>
+      <div class="card"><div class="label">Drift</div><div class="value" id="kpiDrift">--</div><div class="sub" id="kpiDriftTypes"></div></div>
+      <div class="card"><div class="label">Semantic Graph</div><div class="value info" id="kpiNodes">--</div><div class="sub" id="kpiEdges">-- edges</div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="section">
+        <div class="section-header"><h2>Service Health</h2><button class="btn" onclick="checkHealth()">Refresh</button></div>
+        <div class="svc-grid" id="svcGrid"></div>
+      </div>
+      <div class="section">
+        <div class="section-header"><h2>Convergence</h2></div>
+        <div id="convContent">Loading...</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header"><h2>Live Events</h2><span id="sseStatus">Connecting...</span></div>
+      <ul id="events"></ul>
+    </div>
+  </div>
+  <script>
+  (function() {
+    var esc = function(s) { if (s == null) return ''; var d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+
+    function loadSummary() {
+      fetch('/summary?raw=1').then(function(r) { return r.json(); }).then(function(d) {
+        var st = d.state;
+        if (st) {
+          document.getElementById('kpiState').textContent = st.lastNode || '--';
+          document.getElementById('kpiEpoch').textContent = 'epoch ' + (st.epoch || 0) + (st.updatedAt ? ' \u2014 ' + st.updatedAt.slice(0,19) : '');
+        }
+        var fin = d.finality;
+        if (fin) {
+          var pct = fin.goal_score != null ? (fin.goal_score * 100).toFixed(1) + '%' : '--';
+          var el = document.getElementById('kpiGoal');
+          el.textContent = pct;
+          el.className = 'value ' + (fin.status === 'RESOLVED' ? 'ok' : fin.goal_score >= 0.75 ? 'warn' : 'info');
+          document.getElementById('kpiFinality').innerHTML = '<span class="badge ' + (fin.status === 'RESOLVED' ? 'green' : fin.status === 'near_finality' ? 'yellow' : 'blue') + '">' + esc(fin.status) + '</span>';
+
+          var conv = fin.convergence;
+          var convEl = document.getElementById('convContent');
+          var score = fin.goal_score || 0;
+          var fillColor = score >= 0.92 ? 'var(--green)' : score >= 0.5 ? 'var(--yellow)' : 'var(--accent)';
+          var html = '<div class="convergence-bar"><div class="conv-track"><div class="conv-fill" style="width:' + (score * 100) + '%;background:' + fillColor + '"></div></div><div class="conv-label">' + (score * 100).toFixed(1) + '%</div></div>';
+          if (fin.dimensions) {
+            var dims = fin.dimensions;
+            var pairs = [['Claim confidence', dims.claim_avg_confidence], ['Contradiction resolved', dims.contradiction_resolution_ratio], ['Goal completion', dims.goal_completion_ratio], ['Risk (inverse)', dims.risk_score_inverse]];
+            pairs.forEach(function(p) {
+              var v = p[1] != null ? p[1] : 0;
+              var c = v >= 0.8 ? 'var(--green)' : v >= 0.5 ? 'var(--yellow)' : 'var(--red)';
+              html += '<div class="dim-row"><span class="dim-name">' + p[0] + '</span><div class="dim-bar"><div class="dim-fill" style="width:' + (v*100) + '%;background:' + c + '"></div></div><span class="dim-val">' + (v*100).toFixed(0) + '%</span></div>';
+            });
+          }
+          if (conv) {
+            html += '<div class="conv-extra">';
+            html += 'rate: ' + (conv.rate != null ? conv.rate.toFixed(4) : '--');
+            html += ' \u2014 monotonic: ' + (conv.is_monotonic ? 'yes' : 'no');
+            html += ' \u2014 plateau: ' + (conv.is_plateaued ? 'yes' : 'no');
+            if (conv.estimated_rounds != null) html += ' \u2014 ETA: ' + conv.estimated_rounds + ' rounds';
+            if (conv.trajectory_quality != null) html += ' \u2014 trajectory: ' + (conv.trajectory_quality * 100).toFixed(0) + '%';
+            html += '</div>';
+          }
+          convEl.innerHTML = html;
+        }
+        var dr = d.drift;
+        if (dr) {
+          var dEl = document.getElementById('kpiDrift');
+          dEl.textContent = dr.level || 'none';
+          dEl.className = 'value ' + (dr.level === 'high' || dr.level === 'critical' ? 'err' : dr.level === 'medium' ? 'warn' : 'ok');
+          document.getElementById('kpiDriftTypes').textContent = (dr.types || []).join(', ') || 'none';
+        }
+        var sg = d.state_graph;
+        if (sg) {
+          var totalNodes = Object.values(sg.nodes || {}).reduce(function(a,b){return a+b;},0);
+          var totalEdges = Object.values(sg.edges || {}).reduce(function(a,b){return a+b;},0);
+          document.getElementById('kpiNodes').textContent = totalNodes + ' nodes';
+          document.getElementById('kpiEdges').textContent = totalEdges + ' edges \u2014 ' + Object.entries(sg.nodes||{}).map(function(e){return e[0]+':'+e[1];}).join(' ');
+        }
+      }).catch(function() {});
+    }
+    loadSummary();
+    setInterval(loadSummary, 10000);
+
+    var services = [
+      { name: 'Postgres', url: '/health' },
+      { name: 'Feed API', url: '/summary?raw=1' },
+      { name: 'Facts Worker', check: 'feed' },
+      { name: 'NATS', check: 'feed' },
+      { name: 'S3 (MinIO)', check: 'feed' }
+    ];
+    function checkHealth() {
+      var grid = document.getElementById('svcGrid');
+      grid.innerHTML = '';
+      services.forEach(function(svc) {
+        var item = document.createElement('div');
+        item.className = 'svc-item';
+        var dot = document.createElement('div');
+        dot.className = 'svc-dot checking';
+        item.appendChild(dot);
+        item.appendChild(document.createTextNode(svc.name));
+        grid.appendChild(item);
+        var url = svc.url || '/health';
+        fetch(url, { signal: AbortSignal.timeout(4000) })
+          .then(function(r) { dot.className = 'svc-dot ' + (r.ok ? 'up' : 'down'); })
+          .catch(function() { dot.className = 'svc-dot down'; });
+      });
+    }
+    checkHealth();
+    setInterval(checkHealth, 30000);
+
+    var ul = document.getElementById('events');
+    var sseStatus = document.getElementById('sseStatus');
+    var es = new EventSource('/events');
+    es.onopen = function() { sseStatus.textContent = 'Connected'; };
+    es.onerror = function() { sseStatus.textContent = 'Disconnected'; };
+    es.onmessage = function(e) {
+      try {
+        var d = JSON.parse(e.data);
+        var li = document.createElement('li');
+        var type = d.type || 'event';
+        var cls = type.includes('state') ? 'state' : type.includes('fact') ? 'facts' : type.includes('drift') ? 'drift' : type.includes('proposal') ? 'proposal' : type.includes('context') ? 'context' : '';
+        li.className = cls;
+        var ts = (d.ts || '').slice(11, 19);
+        li.innerHTML = '<span class="ts">' + esc(ts) + '</span><span class="type">' + esc(type) + '</span>' + (d.source ? ' <span style="color:var(--muted)">' + esc(d.source) + '</span>' : '');
+        ul.insertBefore(li, ul.firstChild);
+        if (ul.children.length > 200) ul.removeChild(ul.lastChild);
+      } catch(err) {}
+    };
+  })();
+  </script>
+</body>
+</html>

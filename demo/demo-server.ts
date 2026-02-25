@@ -23,6 +23,12 @@ import {
 import { readFileSync, readdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import pg from "pg";
+import {
+  S3Client,
+  ListObjectsV2Command,
+  DeleteObjectsCommand,
+} from "@aws-sdk/client-s3";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -241,6 +247,71 @@ async function handleResolution(req: IncomingMessage, res: ServerResponse): Prom
   }
 }
 
+/** POST /api/reset — clear all swarm state for a fresh demo run */
+async function handleReset(res: ServerResponse): Promise<void> {
+  const errors: string[] = [];
+
+  // 1. Clear Postgres tables
+  const dbUrl = process.env.DATABASE_URL;
+  if (dbUrl) {
+    const pool = new pg.Pool({ connectionString: dbUrl, max: 1 });
+    try {
+      const tables = [
+        "context_events", "swarm_state", "edges", "nodes",
+        "convergence_history", "decision_records", "finality_certificates",
+        "mitl_pending", "scope_finality_decisions", "processed_messages",
+        "agent_memory", "filter_configs",
+      ];
+      for (const t of tables) {
+        try { await pool.query(`DELETE FROM ${t}`); } catch { /* table may not exist */ }
+      }
+    } catch (e) {
+      errors.push(`db: ${e}`);
+    } finally {
+      await pool.end();
+    }
+  } else {
+    errors.push("db: DATABASE_URL not set");
+  }
+
+  // 2. Clear S3/MinIO facts and drift
+  const s3Endpoint = process.env.S3_ENDPOINT;
+  const s3Bucket = process.env.S3_BUCKET ?? "swarm";
+  if (s3Endpoint) {
+    const s3 = new S3Client({
+      region: process.env.S3_REGION || "us-east-1",
+      endpoint: s3Endpoint,
+      forcePathStyle: true,
+      credentials: {
+        accessKeyId: process.env.S3_ACCESS_KEY ?? "minioadmin",
+        secretAccessKey: process.env.S3_SECRET_KEY ?? "minioadmin",
+      },
+    });
+    for (const prefix of ["facts/", "drift/"]) {
+      try {
+        const list = await s3.send(new ListObjectsV2Command({ Bucket: s3Bucket, Prefix: prefix, MaxKeys: 1000 }));
+        const keys = (list.Contents ?? []).map(c => c.Key!).filter(Boolean);
+        if (keys.length > 0) {
+          await s3.send(new DeleteObjectsCommand({
+            Bucket: s3Bucket,
+            Delete: { Objects: keys.map(Key => ({ Key })) },
+          }));
+        }
+      } catch (e) {
+        errors.push(`s3(${prefix}): ${e}`);
+      }
+    }
+    s3.destroy();
+  } else {
+    errors.push("s3: S3_ENDPOINT not set");
+  }
+
+  // 3. Reset in-memory demo state
+  fedSteps.clear();
+
+  sendJson(res, 200, { ok: true, errors: errors.length ? errors : undefined });
+}
+
 /** GET /api/events — SSE stream proxied from feed server */
 function handleEvents(req: IncomingMessage, res: ServerResponse): void {
   res.writeHead(200, {
@@ -308,8 +379,19 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
       .intro-title{background:linear-gradient(135deg,var(--accent),var(--purple));background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent}
     }
     .intro-sub{font-size:1rem;color:var(--muted);max-width:560px;line-height:1.7}
-    .begin-btn{padding:0.75rem 2.5rem;font-size:1rem;font-weight:700;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;font-family:var(--font);transition:filter .15s;margin-top:0.5rem}
+    .intro-actions{display:flex;gap:0.75rem;margin-top:0.5rem;align-items:center}
+    .begin-btn{padding:0.75rem 2.5rem;font-size:1rem;font-weight:700;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;font-family:var(--font);transition:filter .15s}
     .begin-btn:hover{filter:brightness(1.1)}
+    .reset-btn{padding:0.75rem 1.5rem;font-size:0.875rem;font-weight:600;background:transparent;color:var(--muted);border:1px solid var(--border2);border-radius:var(--radius);cursor:pointer;font-family:var(--font);transition:all .2s}
+    .reset-btn:hover{color:var(--red);border-color:var(--red)}
+    .reset-btn:disabled{opacity:0.5;cursor:not-allowed}
+    .reset-msg{font-size:0.75rem;color:var(--green);min-height:1.2em;margin-top:0.25rem}
+    .svc-status{display:flex;align-items:center;gap:0.5rem;margin-top:0.75rem;font-size:0.8125rem;color:var(--muted)}
+    .svc-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+    .svc-dot.checking{background:var(--muted);animation:pulse 1s infinite}
+    .svc-dot.ok{background:var(--green)}
+    .svc-dot.down{background:var(--red)}
+    .begin-btn:disabled{opacity:0.5;cursor:not-allowed;filter:none}
 
     /* Topbar */
     .topbar{display:flex;align-items:center;justify-content:space-between;padding:0 1.25rem;height:48px;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0}
@@ -533,6 +615,33 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
 
     @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
     ::-webkit-scrollbar{width:5px;height:5px} ::-webkit-scrollbar-track{background:transparent} ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:99px}
+
+    /* HITL Modal overlay */
+    .hitl-modal-backdrop{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(11,13,18,0.88);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:100;display:flex;align-items:center;justify-content:center;padding:2rem;animation:modalFadeIn .3s ease}
+    .hitl-modal-backdrop.hidden{display:none}
+    .hitl-modal{background:var(--surface);border:1px solid var(--border2);border-radius:14px;max-width:700px;width:100%;max-height:85vh;overflow-y:auto;box-shadow:0 24px 80px rgba(0,0,0,0.6),0 0 0 1px rgba(79,142,247,0.12);animation:modalSlideIn .4s ease}
+    .hitl-modal-header{display:flex;align-items:center;gap:0.85rem;padding:1.25rem 1.5rem;border-bottom:1px solid var(--border);background:var(--surface2);border-radius:14px 14px 0 0;position:sticky;top:0;z-index:1}
+    .hitl-modal-header-icon{width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.3rem;font-weight:800;flex-shrink:0;color:#fff}
+    .hitl-modal-header-icon.purple{background:var(--purple);box-shadow:0 0 24px rgba(167,139,250,0.5);animation:pulseGlowPurple 2s infinite}
+    .hitl-modal-header-icon.amber{background:var(--amber);color:#000;box-shadow:0 0 24px rgba(245,158,11,0.5);animation:pulseGlowAmber 2s infinite}
+    .hitl-modal-header-text{flex:1}
+    .hitl-modal-header-title{font-size:1.25rem;font-weight:800;color:var(--text);letter-spacing:-0.02em}
+    .hitl-modal-header-sub{font-size:0.8125rem;color:var(--muted);margin-top:3px}
+    .hitl-modal-body{padding:1.5rem}
+    .hitl-modal .hitl-section{margin-bottom:1.5rem}
+    .hitl-modal .hitl-section-title{font-size:0.8125rem}
+    .hitl-modal .hitl-narrative{font-size:0.9375rem;line-height:1.75}
+    .hitl-modal .hitl-options{gap:0.75rem}
+    .hitl-modal .hitl-option{padding:1rem 1.2rem;border:2px solid var(--border);transition:border-color .2s,box-shadow .2s,background .2s}
+    .hitl-modal .hitl-option:hover{border-color:var(--accent);background:var(--surface2)}
+    .hitl-modal .hitl-option.primary{border-color:var(--green);background:linear-gradient(135deg,var(--green-dim),rgba(20,83,45,0.5));box-shadow:0 0 20px rgba(34,197,94,0.1)}
+    .hitl-modal .hitl-option.primary:hover{box-shadow:0 0 30px rgba(34,197,94,0.25);border-color:#4ade80}
+    .hitl-modal .hitl-option.primary .hitl-option-name{font-size:1rem;color:var(--green)}
+    .hitl-modal .situation-card{margin-bottom:0}
+    @keyframes modalFadeIn{from{opacity:0}to{opacity:1}}
+    @keyframes modalSlideIn{from{opacity:0;transform:translateY(24px) scale(0.96)}to{opacity:1;transform:none}}
+    @keyframes pulseGlowPurple{0%,100%{box-shadow:0 0 24px rgba(167,139,250,0.5)}50%{box-shadow:0 0 40px rgba(167,139,250,0.8)}}
+    @keyframes pulseGlowAmber{0%,100%{box-shadow:0 0 24px rgba(245,158,11,0.5)}50%{box-shadow:0 0 40px rgba(245,158,11,0.8)}}
   </style>
 </head>
 <body>
@@ -545,7 +654,15 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     See how agents extract facts, detect contradictions, and why the system
     requests human judgment when it reaches the limits of autonomous resolution.
   </div>
-  <button class="begin-btn" onclick="beginDemo()">Begin</button>
+  <div class="svc-status" id="svcStatus">
+    <div class="svc-dot checking" id="svcDot"></div>
+    <span id="svcText">Checking services...</span>
+  </div>
+  <div class="intro-actions">
+    <button class="begin-btn" id="beginBtn" onclick="beginDemo()" disabled>Begin</button>
+    <button class="reset-btn" id="resetBtn" onclick="resetDemo()">Reset state</button>
+  </div>
+  <div class="reset-msg" id="resetMsg"></div>
 </div>
 
 <!-- Topbar -->
@@ -554,9 +671,12 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     <span class="brand">Project Horizon</span>
     <span class="brand-sub">&nbsp;&middot;&nbsp;Governed Swarm Demo</span>
   </div>
-  <div id="statusPill" class="status-pill pill-idle">
-    <div class="pill-dot"></div>
-    <span id="statusText">Ready</span>
+  <div style="display:flex;align-items:center;gap:0.75rem">
+    <div id="statusPill" class="status-pill pill-idle">
+      <div class="pill-dot"></div>
+      <span id="statusText">Ready</span>
+    </div>
+    <button class="reset-btn" style="padding:0.25rem 0.75rem;font-size:0.6875rem" onclick="restartDemo()">Restart</button>
   </div>
 </div>
 
@@ -676,6 +796,20 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
   </div>
 </div>
 
+<!-- HITL Modal -->
+<div id="hitlModalBackdrop" class="hitl-modal-backdrop hidden">
+  <div class="hitl-modal">
+    <div class="hitl-modal-header" id="hitlModalHeader">
+      <div class="hitl-modal-header-icon purple" id="hitlModalIcon">?</div>
+      <div class="hitl-modal-header-text">
+        <div class="hitl-modal-header-title" id="hitlModalTitle">Action Required</div>
+        <div class="hitl-modal-header-sub" id="hitlModalSub">The system is paused and waiting for your decision</div>
+      </div>
+    </div>
+    <div class="hitl-modal-body" id="hitlModalBody"></div>
+  </div>
+</div>
+
 <script>
 (function() {
   var STEPS = [
@@ -704,6 +838,23 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
 
   buildTimeline();
   connectEvents();
+
+  // ── HITL Modal ──
+  function showHitlModal(bodyHtml, opts) {
+    opts = opts || {};
+    var icon = document.getElementById('hitlModalIcon');
+    var title = document.getElementById('hitlModalTitle');
+    var sub = document.getElementById('hitlModalSub');
+    icon.textContent = opts.icon || '?';
+    icon.className = 'hitl-modal-header-icon ' + (opts.iconColor || 'purple');
+    title.textContent = opts.title || 'Action Required';
+    sub.textContent = opts.sub || 'The system is paused and waiting for your decision';
+    document.getElementById('hitlModalBody').innerHTML = bodyHtml;
+    document.getElementById('hitlModalBackdrop').classList.remove('hidden');
+  }
+  function hideHitlModal() {
+    document.getElementById('hitlModalBackdrop').classList.add('hidden');
+  }
 
   // ── Timeline builder ──
   function buildTimeline() {
@@ -776,8 +927,124 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     stage.scrollTop = stage.scrollHeight;
   }
 
+  // ── Service readiness check ──
+  var _svcReady = false;
+  var _svcCheckTimer = null;
+
+  function setSvcState(state, text) {
+    var dot = document.getElementById('svcDot');
+    var span = document.getElementById('svcText');
+    if (!dot || !span) return;
+    dot.className = 'svc-dot ' + state;
+    span.textContent = text;
+    _svcReady = (state === 'ok');
+    var beginBtn = document.getElementById('beginBtn');
+    if (beginBtn) beginBtn.disabled = !_svcReady;
+  }
+
+  function checkServices() {
+    setSvcState('checking', 'Checking services...');
+    fetch('/api/summary', { signal: AbortSignal.timeout(4000) })
+      .then(function(r) {
+        if (r.ok) {
+          setSvcState('ok', 'Feed server ready');
+          if (_svcCheckTimer) { clearInterval(_svcCheckTimer); _svcCheckTimer = null; }
+        } else {
+          setSvcState('down', 'Feed server not responding (HTTP ' + r.status + ')');
+        }
+      })
+      .catch(function() {
+        setSvcState('down', 'Waiting for feed server...');
+      });
+  }
+
+  function startServicePolling() {
+    checkServices();
+    if (_svcCheckTimer) clearInterval(_svcCheckTimer);
+    _svcCheckTimer = setInterval(checkServices, 3000);
+  }
+
+  startServicePolling();
+
+  // ── Reset ──
+  window.resetDemo = async function() {
+    var btn = document.getElementById('resetBtn');
+    var beginBtn = document.getElementById('beginBtn');
+    var msg = document.getElementById('resetMsg');
+    btn.disabled = true;
+    beginBtn.disabled = true;
+    btn.textContent = 'Resetting...';
+    msg.textContent = '';
+    msg.style.color = 'var(--muted)';
+    setSvcState('checking', 'Resetting...');
+    try {
+      var r = await fetch('/api/reset', { method: 'POST' });
+      var data = await r.json();
+      if (data.ok) {
+        msg.style.color = 'var(--green)';
+        var warns = (data.errors || []);
+        msg.textContent = 'State cleared.' + (warns.length ? ' (' + warns.length + ' warnings)' : '');
+      } else {
+        msg.style.color = 'var(--red)';
+        msg.textContent = 'Reset failed: ' + JSON.stringify(data.errors);
+      }
+    } catch(e) {
+      msg.style.color = 'var(--red)';
+      msg.textContent = 'Reset error: ' + e.message;
+    }
+    btn.disabled = false;
+    btn.textContent = 'Reset state';
+    startServicePolling();
+  };
+
+  // ── Restart (back to intro) ──
+  window.restartDemo = async function() {
+    await resetDemo();
+    demoActive = false;
+    currentStep = -1;
+    stepResults = [];
+    previousFacts = null;
+    lastSummary = null;
+    pendingProposalId = null;
+    initialPendingIds = new Set();
+    isInResolutionLoop = false;
+    hideHitlModal();
+
+    document.getElementById('introOverlay').classList.remove('hidden');
+    setStatus('idle', 'Ready');
+    setStageLabel('');
+    clearStage();
+    document.getElementById('stage').innerHTML =
+      '<div class="stage-initial">' +
+        '<p><strong>Click Begin</strong> to start. The demo feeds 5 documents to the swarm one by one. You will see each agent process them in real time.</p>' +
+        '<div class="prereq"><strong>Prerequisite:</strong> run <code>npm run swarm:all</code> in another terminal so agents can process documents.</div>' +
+      '</div>';
+    document.getElementById('timeline').innerHTML = '';
+    buildTimeline();
+    document.getElementById('tlProgress').textContent = 'Step 0 / 5';
+    document.getElementById('rScore').textContent = '0%';
+    document.getElementById('rTrackFill').style.width = '0%';
+    document.getElementById('rScoreSub').textContent = 'Waiting for data';
+    setDim('dClaim', 'dClaimBar', null);
+    setDim('dContra', 'dContraBar', null);
+    setDim('dGoal', 'dGoalBar', null);
+    setDim('dRisk', 'dRiskBar', null);
+    updateCount('cClaims', 0);
+    updateCount('cGoals', 0);
+    updateCount('cContra', 0);
+    updateCount('cRisks', 0);
+    document.getElementById('driftBadge').textContent = 'None';
+    document.getElementById('driftBadge').className = 'drift-badge none';
+    document.getElementById('feedLog').innerHTML = '';
+    updateSituationPanel(null, null);
+  };
+
   // ── Begin ──
   window.beginDemo = async function() {
+    if (!_svcReady) return;
+    var beginBtn = document.getElementById('beginBtn');
+    beginBtn.disabled = true;
+    if (_svcCheckTimer) { clearInterval(_svcCheckTimer); _svcCheckTimer = null; }
     try {
       var r = await fetch('/api/pending');
       if (r.ok) {
@@ -1063,7 +1330,12 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     html += '</div></div>';
 
     html += '</div>';
-    appendToStage(html);
+    showHitlModal(html, {
+      title: 'Governance Intervention',
+      sub: 'State transition blocked — drift is ' + driftLevel,
+      icon: '!',
+      iconColor: 'amber'
+    });
     addActivity('Governance: blocked ' + fromState + ' -> ' + toState + ' (drift ' + driftLevel + ')', 'gov');
   }
 
@@ -1076,6 +1348,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
       var result = await r.json();
       if (result.ok) {
         initialPendingIds.add(proposalId);
+        hideHitlModal();
         appendToStage(agentCardHtml('G', 'Governance', 'Human override accepted. State advancing...', 'green'));
         addActivity('Human: override approved', 'hitl');
         setStatus('running', 'Processing...');
@@ -1219,7 +1492,13 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     html += '<div id="resolutionArea" style="display:none"></div>';
     html += '</div>';
 
-    document.getElementById('stage').innerHTML = html;
+    appendToStage(agentCardHtml('?', 'System Paused', 'A decision is required. Review the panel that has appeared.', 'purple'));
+    showHitlModal(html, {
+      title: 'Human Decision Required',
+      sub: 'The system has paused at ' + gs + '% finality and needs your input to proceed',
+      icon: '?',
+      iconColor: 'purple'
+    });
     addActivity('Human review required — finality ' + gs + '%', 'hitl');
   }
 
@@ -1246,6 +1525,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
       await r.json();
       initialPendingIds.add(submittedId);
       pendingProposalId = null;
+      hideHitlModal();
 
       addActivity('Decision: ' + option.replace(/_/g, ' '), 'gov');
       await refreshSummary();
@@ -1281,6 +1561,7 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     var text = (document.getElementById('resolutionText') || {}).value || '';
     if (!text.trim()) return;
     isInResolutionLoop = true;
+    hideHitlModal();
     stepSeen = { facts: false, drift: false, planner: false, complete: false };
     clearStage();
     setStageLabel('Re-processing with resolution');
@@ -1659,6 +1940,10 @@ async function main(): Promise<void> {
         } catch (e) {
           sendJson(res, 502, { error: String(e) });
         }
+        return;
+      }
+      if (req.method === "POST" && pathname === "/api/reset") {
+        await handleReset(res);
         return;
       }
       if (req.method === "GET" && pathname === "/api/events") {

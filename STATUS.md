@@ -14,8 +14,8 @@ Governed agent swarm: event-driven agents (facts, drift, planner, status) consum
 - NATS JetStream stream, four agents (facts, drift, planner, status), governance agent, executor.
 - Governance rules (`governance.yaml`), **policy engine** (YAML default; OPA-WASM implementation in `opaPolicyEngine.ts` but not wired at runtime), **decision records** persisted to `decision_records` with policy version hash, **obligation enforcer** (executeObligations after each decision), **combining algorithms** (denyOverrides, firstApplicable). OpenFGA policy checks. MITL server (approve/reject/options, **GET /finality-certificate/:scope_id**).
 - Facts agent: readContext -> facts-worker `/extract` -> writeFacts to S3. Direct pipeline and optional Mastra orchestration.
-- Feed server (port 3002): summary (policy_version, finality_certificate, convergence with trajectory_quality/oscillation_detected), POST context/docs, POST context/resolution, **GET /convergence?scope=** for convergence state.
-- Docker Compose: Postgres (pgvector image), MinIO, NATS, facts-worker, OpenFGA, feed, otel-collector.
+- Feed server (port 3002): observability dashboard + API. Summary (policy_version, finality_certificate, convergence with trajectory_quality/oscillation_detected), POST context/docs, POST context/resolution, **GET /convergence?scope=** for convergence state. HTML dashboard shows KPIs, service health, convergence bars, live SSE events, and links to Grafana/Prometheus.
+- Docker Compose: Postgres (pgvector image), MinIO, NATS, facts-worker, OpenFGA, feed, otel-collector, Prometheus, Grafana.
 
 **Finality and semantic layer**
 
@@ -33,7 +33,7 @@ Governed agent swarm: event-driven agents (facts, drift, planner, status) consum
 - **factsAgent writeFacts**: after S3 write, calls `syncFactsToSemanticGraph(scopeId, facts)`; sync failure is logged, S3 write still succeeds.
 - **activationFilters.ts**: optional **pressure_directed** filter using convergence history (highest-pressure dimension); fallback when `convergence_history` missing.
 - **modelConfig.ts**: Ollama base URL, embedding model, chat/rationale/HITL models; SCOPE_ID.
-- **docker-compose**: Postgres image `pgvector/pgvector:pg15`; facts-worker env (OLLAMA_BASE_URL, EXTRACTION_MODEL, HF_TOKEN, GLiNER, NLI).
+- **docker-compose**: Postgres image `pgvector/pgvector:pg15`; facts-worker uses OpenAI by default (`OPENAI_API_KEY`); Ollama opt-in via `FACTS_WORKER_OLLAMA=1`. GLiNER and NLI models disabled by default (`SKIP_GLINER=1`, `SKIP_NLI=1`).
 
 **Demo**
 
@@ -44,7 +44,7 @@ Governed agent swarm: event-driven agents (facts, drift, planner, status) consum
 - Migrations 002–010 applied via ensure-schema; Postgres + pgvector and tables `context_events`, `swarm_state`, `nodes`/`edges`, `scope_finality_decisions`, `convergence_history`, etc. present.
 - `loadFinalitySnapshot('default')` runs against real DB; Ollama (bge-m3) returns 1024-d embeddings.
 - Script `scripts/test-postgres-ollama.ts` (pnpm run test:postgres-ollama) exercises Postgres + Ollama.
-- **Unit tests**: 268 passing (semanticGraph, finalityEvaluator, convergenceTracker, finalityDecisions, governanceAgent, policyEngine, policyVersions, combiningAlgorithms, finalityCertificates, obligationEnforcer, factsToSemanticGraph, embeddingPipeline, hitlFinalityRequest, activationFilters, etc.).
+- **Unit tests**: 283 across 38 suites (semanticGraph, finalityEvaluator, convergenceTracker, finalityDecisions, governanceAgent, policyEngine, policyVersions, combiningAlgorithms, finalityCertificates, obligationEnforcer, factsToSemanticGraph, embeddingPipeline, hitlFinalityRequest, activationFilters, agent tools, etc.).
 - **Convergence benchmark**: `npx tsx scripts/benchmark-convergence.ts` — 7 scenarios (pure math, no Docker) for Lyapunov, monotonicity, plateau, divergence.
 
 ## HITL seed scenario

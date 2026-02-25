@@ -14,7 +14,7 @@ and where assumptions begin.
 ```mermaid
 flowchart TB
   subgraph tested["Tested / validated"]
-    U[Unit tests Vitest 268+]
+    U[Unit tests Vitest 283]
     BENCH[Convergence benchmark 7 scenarios]
     E2E[E2E pipeline run-e2e.sh manual]
   end
@@ -48,7 +48,7 @@ flowchart TB
 
 ## 2. Unit tests (Vitest)
 
-**268 tests across 33 files.** All run with `pnpm test` (no Docker, no network).
+**283 tests across 38 files.** All run with `pnpm test` (no Docker, no network).
 
 | Test file | Tests | Coverage area | Key assertions |
 |-----------|-------|--------------|----------------|

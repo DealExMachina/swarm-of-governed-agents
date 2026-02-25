@@ -12,7 +12,7 @@ Short audit of STATUS.md and the design docs (governance-design.md, finality-des
 - Finality: finality.yaml, evaluator, Gates B/C/D (contradiction mass, evidence coverage, trajectory_quality, quiescence), certificates (JWS), session_finalized, convergence tracker, HITL, MITL.
 - Semantic graph: bitemporal columns, time-travel queries, supersedeNode/supersedeEdge, loadFinalitySnapshot (contradiction_mass, evidence_coverage), getEvidenceCoverageForScope.
 - Governance: YAML engine, decision records, obligation enforcer, combining algorithms, policy version hashes, OpenFGA.
-- Demo, E2E flow, check-services, seed scripts, test counts (268 unit tests).
+- Demo, E2E flow, check-services, seed scripts, test counts (283 tests across 38 suites).
 - "Next steps" and "Not yet done" match reality (resolutions→goals, HITL UX, embeddings, etc.).
 
 **docs/finality-design.md**
