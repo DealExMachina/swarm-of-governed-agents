@@ -1175,24 +1175,14 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
       if (data.ok) {
         addActivity('All ' + data.fed + ' documents fed to swarm', 'doc');
         data.results.forEach(function(d, i) {
-          appendToStage(
-            '<div class="doc-card" id="conc-doc-' + i + '">' +
-              '<div class="doc-card-head">' +
-                '<div><div class="doc-card-title">' + escHtml(d.title) + '</div><div class="doc-card-role">' + escHtml(STEPS[i] ? STEPS[i].role : '') + '</div></div>' +
-                '<div class="doc-card-status feeding" id="conc-doc-status-' + i + '"><div class="pill-dot" style="background:var(--accent);animation:pulse 1s infinite"></div> Queued</div>' +
-              '</div>' +
-              '<div class="doc-card-body">' + escHtml(STEPS[i] ? STEPS[i].insight : '') + '</div>' +
-            '</div>'
-          );
           setTlResult(i, 'Fed to swarm', '', '');
+          addActivity('Fed: ' + d.title, 'doc');
         });
       }
     } catch(e) {
       showError('Could not feed documents: ' + e);
       return;
     }
-
-    appendToStage('<div class="step-separator">Agents processing concurrently</div>');
 
     setStatus('running', 'Agents processing concurrently...');
     stepStartTime = Date.now();
@@ -1381,11 +1371,6 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
         if (ti < doneCount) {
           setTlState(ti, 'done');
           setTlResult(ti, STEPS[ti].insight.split('.')[0], 'done', 'processed');
-          var statusEl = document.getElementById('conc-doc-status-' + ti);
-          if (statusEl && statusEl.textContent.indexOf('Done') === -1) {
-            statusEl.className = 'doc-card-status done';
-            statusEl.innerHTML = '&#10003; Done';
-          }
         }
       }
       document.getElementById('tlProgress').textContent = doneCount + ' / 5 processed';
