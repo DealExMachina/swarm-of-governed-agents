@@ -59,6 +59,12 @@ Open [http://localhost:3003](http://localhost:3003) to begin the walkthrough.
 
 ---
 
+## Explainability
+
+The feed summary and demo expose **policy version** (governance and finality config hashes), **finality certificate** (signed JWS when RESOLVED; `GET /finality-certificate/:scope_id` on the MITL server), and **convergence** (trajectory quality, oscillation flag, ETA rounds). This supports audit and reproducibility: which policy was in effect, whether the path to finality was stable, and a verifiable certificate for resolved scopes. Bitemporal valid time on claims supports temporal contradiction rules and time-travel queries.
+
+---
+
 ## The 5 documents
 
 ```mermaid

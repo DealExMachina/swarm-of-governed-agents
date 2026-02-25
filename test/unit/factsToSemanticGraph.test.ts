@@ -8,8 +8,11 @@ const updateNodeStatus = vi.fn();
 const hasResolvingEdge = vi.fn();
 const queryNodesByCreator = vi.fn();
 
-vi.mock("../../src/semanticGraph.js", () => ({
+vi.mock("../../src/db.js", () => ({
   runInTransaction: (...args: unknown[]) => runInTransaction(...args),
+}));
+
+vi.mock("../../src/semanticGraph.js", () => ({
   appendNode: (...args: unknown[]) => appendNode(...args),
   appendEdge: (...args: unknown[]) => appendEdge(...args),
   updateNodeConfidence: (...args: unknown[]) => updateNodeConfidence(...args),

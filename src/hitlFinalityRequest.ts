@@ -51,6 +51,11 @@ function buildConvergenceSection(request: FinalityReviewRequest): string {
     lines.push(`Highest-pressure dimension (bottleneck): ${c.highest_pressure}`);
   }
 
+  lines.push(`Trajectory quality (Gate C): ${c.trajectory_quality.toFixed(2)} (need >= 0.7 for auto-resolve)`);
+  if (c.oscillation_detected) {
+    lines.push("Oscillation detected: score history shows direction changes or negative autocorrelation; auto-resolve is gated.");
+  }
+
   if (c.score_history.length > 1) {
     lines.push(`Score trajectory: [${c.score_history.map((s) => s.toFixed(3)).join(", ")}]`);
   }

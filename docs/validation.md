@@ -14,7 +14,7 @@ and where assumptions begin.
 ```mermaid
 flowchart TB
   subgraph tested["Tested / validated"]
-    U[Unit tests Vitest 196+]
+    U[Unit tests Vitest 268+]
     BENCH[Convergence benchmark 7 scenarios]
     E2E[E2E pipeline run-e2e.sh manual]
   end
@@ -33,8 +33,8 @@ flowchart TB
 | Governance rules (YAML evaluation) | Unit tests against `governance.yaml` | That rule set is complete for production drift taxonomies |
 | Governance modes (MASTER/MITL/YOLO) | Unit tests + E2E seed + verification script | That three modes cover all real operational needs |
 | Oversight agent (LLM-backed) | Unit test for no-LLM fallback path | LLM-backed oversight quality (accept/escalate decisions) |
-| Convergence tracker (Lyapunov V, pressure, monotonicity, plateau) | 28 unit tests + 7-scenario benchmark (pure math) | That synthetic snapshot trajectories represent real LLM-generated fact sequences |
-| Finality evaluator (RESOLVED, ESCALATED, review) | 11 unit tests with mocked snapshots + convergence state | That finality thresholds generalize across domains |
+| Convergence tracker (Lyapunov V, pressure, monotonicity, plateau, Gate C oscillation/trajectory) | 32 unit tests + 7-scenario benchmark (pure math) | That synthetic snapshot trajectories represent real LLM-generated fact sequences |
+| Finality evaluator (RESOLVED, ESCALATED, review, Gate C/D, certificates) | 13 unit tests with mocked snapshots + convergence state | That finality thresholds generalize across domains |
 | Semantic graph (nodes, edges, CRDT upserts) | 7 unit tests for factsToSemanticGraph, 2 for semanticGraph | Graph integrity under concurrent writers from multiple agents |
 | Embedding pipeline (Ollama bge-m3) | 11 unit tests (mocked fetch, dimension checks) | Embedding quality and semantic similarity accuracy |
 | HITL finality request | 3 unit tests with mocked evaluateFinality | Human response quality and decision turnaround |
@@ -48,7 +48,7 @@ flowchart TB
 
 ## 2. Unit tests (Vitest)
 
-**197 tests across 26 files.** All run with `pnpm test` (no Docker, no network).
+**268 tests across 33 files.** All run with `pnpm test` (no Docker, no network).
 
 | Test file | Tests | Coverage area | Key assertions |
 |-----------|-------|--------------|----------------|
@@ -61,13 +61,17 @@ flowchart TB
 | `policy.test.ts` | 4 | OpenFGA policy checks | Default allow when no store ID, allowed/denied via mock fetch, ECONNREFUSED denial |
 | `governance.test.ts` | 17 | Governance YAML rules + transition rules | loadPolicies parses YAML, evaluateRules matches drift level/type, canTransition blocks critical drift, scope overrides |
 | `stateGraph.test.ts` | 11 | State machine transitions + Postgres CAS | Pure transitions cycle through 3 nodes, epoch increment, CAS failure returns null, advanceState emits WAL event, initState with ON CONFLICT, governance-blocked advance |
-| `convergenceTracker.test.ts` | 28 | Lyapunov V, pressure, dimension scores, analyzeConvergence | V=0 for perfect, V increases with worse dims, pressure highest on worst dim, monotonicity detection (beta gate), plateau detection (tau), convergence rate sign, estimated rounds, spike-and-drop blocks monotonicity, combined plateau + bottleneck |
-| `finalityEvaluator.test.ts` | 11 | Finality evaluation pipeline | loadFinalitySnapshot defaults, loadFinalityConfig parses YAML, computeGoalScore (perfect=1, custom weights), RESOLVED when all conditions met, review when in near-auto band, monotonicity gate blocks RESOLVED, divergence triggers ESCALATED, review includes convergence data |
+| `convergenceTracker.test.ts` | 32 | Lyapunov V, pressure, dimension scores, analyzeConvergence, Gate C | V=0 for perfect, pressure highest on worst dim, monotonicity/plateau, convergence rate, ETA, spike-and-drop, oscillation detection, trajectory quality, coordination_signal |
+| `finalityEvaluator.test.ts` | 13 | Finality evaluation pipeline | loadFinalitySnapshot, loadFinalityConfig, computeGoalScore, RESOLVED with Gate C/D, review, divergence, certificate payload, quiescence |
 | `finalityDecisions.test.ts` | 4 | Finality decision persistence | recordFinalityDecision INSERT with scope/option/days, getLatestFinalityDecision returns latest or null |
 | `factsToSemanticGraph.test.ts` | 7 | Facts-to-graph sync (CRDT) | Insert claims/goals/risks, NLI contradiction edge parsing, monotonic confidence (preserve higher), stale nodes marked irrelevant, resolved contradictions not re-created, reactivation of irrelevant nodes |
 | `semanticGraph.test.ts` | 2 | Semantic graph queries | loadFinalitySnapshot returns correct shape with computed ratios, appendResolutionGoal inserts goal with status resolved |
 | `embeddingPipeline.test.ts` | 11 | Embedding generation + persistence | Empty when no Ollama, empty for blank text, empty on fetch failure, empty on wrong dimension, valid 1024-dim vector, batch returns map, updateNodeEmbedding no-op for wrong length, embedAndPersistNode true/false |
-| `hitlFinalityRequest.test.ts` | 3 | HITL finality submission | Returns false when evaluateFinality returns null or status, adds to MITL pending when review with correct payload shape |
+| `hitlFinalityRequest.test.ts` | 4 | HITL finality submission | Returns false when evaluateFinality returns null or status, adds to MITL pending when review with correct payload shape |
+| `policyEngine.test.ts` | 3 | Policy engine (YAML) | DecisionRecord shape, allow/deny from transition rules, policy_version passthrough |
+| `policyVersions.test.ts` | 3 | Policy version hashes | getGovernancePolicyVersion / getFinalityPolicyVersion return 64-char hex or no-file |
+| `combiningAlgorithms.test.ts` | 6 | Combining algorithms | denyOverrides (deny wins, no_policies), firstApplicable |
+| `finalityCertificates.test.ts` | 4 | Finality certificates (JWS) | buildCertificatePayload, signCertificate compact JWS, verifyCertificate round-trip, invalid JWS throws |
 | `mitlServer.test.ts` | 9 | MITL pending queue operations | addPending + getPending round-trip, approvePending publishes + removes, not_found for unknown, rejectPending publishes rejection, finality_review blocks regular approve (use_finality_response), resolveFinalityPending publishes to swarm.actions.finality, defer with days |
 | `modelConfig.test.ts` | 18 | Model configuration resolution | Ollama base URL (null/blank/trimmed), default models (qwen3:8b, phi4-mini, mistral-small:22b, bge-m3), finality thresholds (defaults, env, clamping), getChatModelConfig (null/Ollama/OpenAI/preference), getOversightModelConfig (null/same/override) |
 | `metrics.test.ts` | 5 | OpenTelemetry metrics | recordProposal/PolicyViolation/AgentLatency/TaskResolutionTime/TaskCost do not throw |
@@ -78,6 +82,7 @@ flowchart TB
 | `agents/plannerAgent.test.ts` | 3 | Planner agent | Returns evaluated actions from governance rules, empty actions for no drift, handles missing drift file |
 | `agents/statusAgent.test.ts` | 2 | Status agent | Reads facts + drift, appends status card to WAL, handles missing data (unknown level) |
 | `agents/governanceAgent.test.ts` | 18 | Governance agent (all paths) | YOLO approve (low drift), critical drift escalates to pending, high drift approves (only critical blocks), MITL adds to pending (no immediate action), evaluateProposalDeterministic: ignore/reject/approve/pending for each mode, commitDeterministicResult publishes correctly, runOversightAgent falls back to deterministic when no LLM, runFinalityCheck calls evaluateFinality and conditionally submitFinalityReviewForScope |
+| `seedFixture.test.ts` | 9 | Seed data and context_doc events | HITL scenario fixture shape (claims/goals/risks/edges), seed-docs directory listing, createSwarmEvent context_doc payload |
 
 ---
 

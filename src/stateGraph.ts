@@ -32,18 +32,18 @@ export function _resetStateTableEnsured(): void {
   _tableEnsured = false;
 }
 
+const SCHEMA_REQUIRED_MSG =
+  "Table swarm_state does not exist. Run schema migrations first (e.g. pnpm run ensure-schema or pnpm run swarm:all).";
+
 export async function ensureStateTable(pool?: pg.Pool): Promise<void> {
   if (_tableEnsured) return;
   const p = pool ?? getPool();
-  await p.query(`
-    CREATE TABLE IF NOT EXISTS swarm_state (
-      scope_id   TEXT PRIMARY KEY,
-      run_id     TEXT NOT NULL,
-      last_node  TEXT NOT NULL,
-      epoch      BIGINT NOT NULL DEFAULT 0,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `);
+  const res = await p.query(
+    "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'swarm_state'",
+  );
+  if ((res.rowCount ?? 0) === 0) {
+    throw new Error(SCHEMA_REQUIRED_MSG);
+  }
   _tableEnsured = true;
 }
 

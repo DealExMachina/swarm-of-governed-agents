@@ -62,19 +62,19 @@ The codebase has a **mature finality and convergence layer** spanning ~1,900 lin
 | PRD Concept | Current Implementation | Gap? |
 |-------------|----------------------|------|
 | **Gate A** (authorization stability) | Not explicit — OpenFGA checks in `governanceAgent.ts`, MITL pending in `mitlServer.ts` | **Yes** — no explicit "blocked high-impact count" metric |
-| **Gate B** (epistemic stability) | `contradictions_unresolved_count` in `FinalitySnapshot`, condition `contradictions.unresolved_count: 0` | **Partial** — count exists but no weighted `mass(U)` by severity/materiality |
-| **Gate C** (progress stability) | `analyzeConvergence()` with monotonicity β, plateau τ, EMA, Lyapunov V, convergence rate α | **Mostly done** — oscillation detection is basic (direction changes), no Fourier or cycle pattern detection |
-| **Gate D** (operational quiescence) | Not implemented — no "no pending admissible proposals" check | **Yes** — significant gap |
-| **Sessions** | Scopes (`scope_id`) serve as implicit sessions. No explicit `Session` object with start/end events | **Partial** — scope is the unit, but no formal session lifecycle |
+| **Gate B** (epistemic stability) | `contradictions_unresolved_count`, **contradiction_mass**, **evidence_coverage** (evidence_schemas.yaml, optional max_age_days staleness); temporal contradiction = valid-time overlap only | **Done** — mass and coverage wired; severity weighting extensible |
+| **Gate C** (progress stability) | `analyzeConvergence()` with monotonicity β, plateau τ, EMA, Lyapunov V, convergence rate α, **oscillation_detected** (direction changes + lag-1 autocorrelation), **trajectory_quality** (0–1), **coordination_signal**; RESOLVED requires trajectory_quality >= 0.7 | **Done** — oscillation and trajectory gate auto-RESOLVED |
+| **Gate D** (operational quiescence) | **Quiescence heuristic** in finality.yaml (idle_cycles_min, window_ms); RESOLVED requires quiescent when configured | **Done** — 0/0 = disabled; configurable threshold and window |
+| **Sessions** | Scopes (`scope_id`) + **session_finalized** event to context WAL when RESOLVED | **Partial** — session_finalized emitted; no session_started or sessions table |
 | **Rounds** | Epochs (state machine ticks) serve as implicit rounds. No explicit round boundaries or time windows | **Partial** — epochs exist but aren't formalized as "rounds" with metrics snapshots |
-| **Finality certificate** | `DecisionRecord` in `context_events` WAL; not a signed certificate | **Yes** — no cryptographic certificate, no multi-signature, no policy version hashes |
-| **Evidence coverage** | Not computed — `FinalitySnapshot` lacks an evidence coverage dimension | **Yes** — significant gap; PRD metric #1 |
-| **Contradiction mass** | Unresolved count only; no severity/materiality weighting | **Partial** — count exists, mass doesn't |
+| **Finality certificate** | **JWS (Ed25519)** in `finality_certificates` table; payload has policy_version_hashes; GET /finality-certificate/:scope_id on MITL server | **Done** — signed certificate on RESOLVED |
+| **Evidence coverage** | **getEvidenceCoverageForScope()** from evidence_schemas.yaml (required evidence_types); optional temporal_constraint.max_age_days for staleness | **Done** — in loadFinalitySnapshot |
+| **Contradiction mass** | **contradiction_mass** in FinalitySnapshot (unresolved × weight); temporal contradiction count uses valid-time overlap | **Done** — wired in snapshot and finality |
 | **Decision confidence** | `computeGoalScore()` is a weighted aggregate, not a calibrated confidence | **Partial** — score exists, but it's a goal gradient, not "confidence" per se |
 | **Activation pressure** | `computePressure()` per dimension; queue depth not integrated | **Partial** — pressure exists, SLA timers don't |
-| **Coordination signal** | Not implemented | **Yes** — new concept |
+| **Coordination signal** | **coordination_signal** in ConvergenceState (signal_type, value, metadata: highest_pressure_dimension, trajectory_quality, oscillation_detected) | **Done** — minimal signal from convergence state |
 | **Protocol switching** | Not implemented — single evaluation path (deterministic → oversight → LLM) | **Yes** — no debate-lite, no diversity+confidence, no vote |
-| **Oscillation detection** | Basic: direction changes in `analyzeConvergence()` | **Partial** — no cycle pattern detection, no Fourier analysis |
+| **Oscillation detection** | **Direction changes** + **lag-1 autocorrelation** (simple-statistics); trajectory_quality caps when oscillation detected | **Done** — autocorrelation and direction-change gate |
 | **HITL routing** | `submitFinalityReviewForScope()` with LLM explanation, dimension breakdown, blocker analysis | **Mostly done** — well-implemented |
 
 ### Current finality evaluation flow (already working)
@@ -88,7 +88,7 @@ swarm.finality.evaluate →
     4. recordConvergencePoint() → append to convergence_history
     5. getConvergenceState() → α, β-monotonicity, τ-plateau, V(t)
     6. Check conditions:
-       Path A: all RESOLVED conditions + score ≥ 0.92 + is_monotonic → RESOLVED
+       Path A: all RESOLVED conditions + score ≥ 0.92 + is_monotonic + trajectory_quality ≥ 0.7 (Gate C) + quiescent (Gate D when configured) → emit session_finalized, sign & persist finality certificate, RESOLVED
        Path B: score ∈ [0.40, 0.92) → FinalityReviewRequest → HITL
        Path C: divergence (α < -0.05) → ESCALATED
        Path D: condition match → BLOCKED / EXPIRED

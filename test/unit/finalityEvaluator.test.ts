@@ -8,6 +8,8 @@ import {
   evaluateFinality,
   type FinalitySnapshot,
   type GoalGradientConfig,
+  type FinalityCertificatePayload,
+  type ContradictionSeverity,
 } from "../../src/finalityEvaluator";
 
 const FINALITY_PATH = join(__dirname, "../../finality.yaml");
@@ -57,6 +59,25 @@ describe("finalityEvaluator", () => {
       expect(s.claims_active_min_confidence).toBe(0);
       expect(s.contradictions_unresolved_count).toBe(0);
       expect(s.scope_risk_score).toBe(0);
+    });
+  });
+
+  describe("Phase 0 types", () => {
+    it("FinalityCertificatePayload has required shape", () => {
+      const payload: FinalityCertificatePayload = {
+        scope_id: "default",
+        decision: "RESOLVED",
+        timestamp: new Date().toISOString(),
+        policy_version_hashes: { governance: "abc", finality: "def" },
+        dimensions_snapshot: { claim_confidence: 0.9 },
+      };
+      expect(payload.scope_id).toBe("default");
+      expect(payload.decision).toBe("RESOLVED");
+      expect(payload.policy_version_hashes?.governance).toBe("abc");
+    });
+    it("ContradictionSeverity is string union", () => {
+      const severities: ContradictionSeverity[] = ["low", "medium", "high", "material"];
+      expect(severities).toHaveLength(4);
     });
   });
 

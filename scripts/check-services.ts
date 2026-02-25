@@ -153,7 +153,8 @@ async function checkOllama(): Promise<string | null> {
 }
 
 async function checkFeed(): Promise<string | null> {
-  const base = process.env.FEED_URL ?? "http://localhost:3002";
+  // Use 127.0.0.1 so Node does not resolve localhost to IPv6 (feed may bind IPv4 only)
+  const base = process.env.FEED_URL ?? "http://127.0.0.1:3002";
   try {
     const res = await fetch(`${base.replace(/\/$/, "")}/summary`, {
       signal: AbortSignal.timeout(5000),

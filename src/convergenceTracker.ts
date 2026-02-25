@@ -8,10 +8,14 @@
  * 4. Plateau detection — EMA of progress ratio; triggers HITL when stalled (MACI)
  * 5. Pressure-directed activation — per-dimension pressure for stigmergic routing (Royal Society 2024)
  *
+ * Gate C: oscillation detection (direction runs + lag-1 autocorrelation), trajectory quality score,
+ * and coordination signal (agent-to-agent).
+ *
  * All analysis functions are pure (no side effects). DB persistence is separated.
  */
 
-import type { FinalitySnapshot, GoalGradientConfig } from "./finalityEvaluator.js";
+import { sampleCorrelation } from "simple-statistics";
+import type { FinalitySnapshot, GoalGradientConfig, CoordinationSignal } from "./finalityEvaluator.js";
 import { getPool } from "./db.js";
 import pg from "pg";
 
@@ -43,6 +47,14 @@ export interface ConvergenceState {
   plateau_rounds: number;
   /** Dimension with highest pressure (biggest gap × weight). */
   highest_pressure_dimension: string;
+  /** Gate C: coordination signal (agent-to-agent). */
+  coordination_signal?: CoordinationSignal | null;
+  /** Gate C: oscillation detected (direction changes or negative autocorrelation). */
+  oscillation_detected: boolean;
+  /** Gate C: trajectory quality 0–1 (1 = monotonic improvement, lower for oscillation/spike-drop). */
+  trajectory_quality: number;
+  /** Gate C: lag-1 autocorrelation of goal_score (null if insufficient data). */
+  autocorrelation_lag1: number | null;
 }
 
 export interface ConvergenceConfig {
@@ -181,6 +193,10 @@ export function analyzeConvergence(
     is_plateaued: false,
     plateau_rounds: 0,
     highest_pressure_dimension: "",
+    coordination_signal: null,
+    oscillation_detected: false,
+    trajectory_quality: 1,
+    autocorrelation_lag1: null,
   };
 
   if (history.length === 0) return empty;
@@ -201,8 +217,46 @@ export function analyzeConvergence(
     return {
       ...empty,
       highest_pressure_dimension: highestDim,
+      coordination_signal: {
+        signal_type: "convergence",
+        value: undefined,
+        metadata: { highest_pressure_dimension: highestDim },
+      },
     };
   }
+
+  // --- Gate C: oscillation and trajectory quality (last N points) ---
+  const windowSize = Math.min(history.length, 10);
+  const scores = history.slice(-windowSize).map((p) => p.goal_score);
+  let directionChanges = 0;
+  for (let i = 1; i < scores.length; i++) {
+    const d = scores[i] - scores[i - 1];
+    if (i >= 2) {
+      const dPrev = scores[i - 1] - scores[i - 2];
+      if ((d > 0.001 && dPrev < -0.001) || (d < -0.001 && dPrev > 0.001)) directionChanges++;
+    }
+  }
+  let autocorrelationLag1: number | null = null;
+  if (scores.length >= 4) {
+    const lagged = scores.slice(1);
+    const current = scores.slice(0, -1);
+    const corr = sampleCorrelation(current, lagged);
+    autocorrelationLag1 = Number.isFinite(corr) ? corr : null;
+  }
+  const oscillationDetected =
+    directionChanges >= 2 ||
+    (autocorrelationLag1 !== null && autocorrelationLag1 < -0.3);
+  // Trajectory quality: 1 minus penalty for direction changes and oscillation
+  let trajectoryQuality = 1 - 0.12 * Math.min(directionChanges, 5);
+  if (oscillationDetected && autocorrelationLag1 !== null && autocorrelationLag1 < -0.3) {
+    trajectoryQuality = Math.min(trajectoryQuality, 0.65);
+  }
+  // Spike-and-drop: if latest score is well below max in window, reduce quality
+  const maxScore = Math.max(...scores);
+  if (scores.length >= 3 && maxScore - scores[scores.length - 1] > 0.05) {
+    trajectoryQuality = Math.min(trajectoryQuality, 0.85);
+  }
+  trajectoryQuality = Math.max(0, Math.min(1, trajectoryQuality));
 
   // --- Convergence rate: α = -ln(V(t) / V(t-1)) averaged over recent pairs ---
   const alphas: number[] = [];
@@ -274,6 +328,17 @@ export function analyzeConvergence(
 
   const isPlateaued = plateauRounds >= config.tau;
 
+  const coordination_signal: CoordinationSignal = {
+    signal_type: "convergence",
+    value: estimatedRounds ?? undefined,
+    metadata: {
+      highest_pressure_dimension: highestDim,
+      oscillation_detected: oscillationDetected,
+      trajectory_quality: trajectoryQuality,
+      autocorrelation_lag1: autocorrelationLag1 ?? undefined,
+    },
+  };
+
   return {
     history,
     convergence_rate: avgAlpha,
@@ -282,6 +347,10 @@ export function analyzeConvergence(
     is_plateaued: isPlateaued,
     plateau_rounds: plateauRounds,
     highest_pressure_dimension: highestDim,
+    coordination_signal,
+    oscillation_detected: oscillationDetected,
+    trajectory_quality: trajectoryQuality,
+    autocorrelation_lag1: autocorrelationLag1,
   };
 }
 

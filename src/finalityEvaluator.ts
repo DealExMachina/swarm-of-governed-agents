@@ -3,6 +3,9 @@ import { join } from "path";
 import { parse as parseYaml } from "yaml";
 import { getFinalityThresholds } from "./modelConfig.js";
 
+/** Severity/materiality for contradiction mass (Gate B). */
+export type ContradictionSeverity = "low" | "medium" | "high" | "material";
+
 /**
  * Snapshot of scope-level aggregates used for finality conditions and goal score.
  * When semanticGraph exists, loadFinalitySnapshot should run a single aggregation query.
@@ -29,6 +32,28 @@ export interface FinalitySnapshot {
   scope_last_delta_age_ms?: number;
   scope_last_active_age_ms?: number;
   assessments_critical_unaddressed_count?: number;
+  /** Gate B: weighted contradiction mass (severity × materiality); optional until Phase 1. */
+  contradiction_mass?: number;
+  /** Gate B: evidence coverage ratio (0–1); optional until Phase 1. */
+  evidence_coverage?: number;
+  /** Coordination signal (agent-to-agent); optional until Phase 2. */
+  coordination_signal?: CoordinationSignal | null;
+}
+
+/** Coordination signal payload (placeholder for Phase 2). */
+export interface CoordinationSignal {
+  signal_type: string;
+  value?: number;
+  metadata?: Record<string, unknown>;
+}
+
+/** Payload for finality certificate (JWS signing in Phase 4). */
+export interface FinalityCertificatePayload {
+  scope_id: string;
+  decision: "RESOLVED" | "ESCALATED" | "BLOCKED" | "EXPIRED";
+  timestamp: string;
+  policy_version_hashes?: { governance?: string; finality?: string };
+  dimensions_snapshot?: Record<string, number>;
 }
 
 export type CaseStatus =
@@ -67,9 +92,19 @@ export interface ConvergenceYamlConfig {
   divergence_rate?: number;
 }
 
+/** Gate D: quiescence heuristic. When both are 0, quiescence is not required. */
+export interface QuiescenceConfig {
+  /** Minimum idle cycles (no state change) before RESOLVED can apply. */
+  idle_cycles_min: number;
+  /** Minimum ms since last state change (scope.last_delta_age_ms). */
+  window_ms: number;
+}
+
 export interface FinalityConfig {
   goal_gradient?: GoalGradientConfig;
   convergence?: ConvergenceYamlConfig;
+  /** Gate D: optional quiescence; 0/0 = disabled. */
+  quiescence?: QuiescenceConfig;
   finality: Record<CaseStatus, FinalityConditionRule>;
 }
 
@@ -232,6 +267,10 @@ export interface ConvergenceData {
   is_monotonic: boolean;
   is_plateaued: boolean;
   score_history: number[];
+  /** Gate C: trajectory quality 0–1; required >= 0.7 for auto RESOLVED. */
+  trajectory_quality: number;
+  /** Gate C: oscillation detected (blocks or downgrades auto-resolve). */
+  oscillation_detected: boolean;
 }
 
 export interface FinalityReviewRequest {
@@ -265,12 +304,42 @@ export type FinalityResult =
   | { kind: "status"; status: CaseStatus }
   | { kind: "review"; request: FinalityReviewRequest };
 
+/** Gate D: true when quiescence is disabled or snapshot meets idle_cycles and window_ms. */
+function isQuiescent(snapshot: FinalitySnapshot, quiescence?: QuiescenceConfig): boolean {
+  if (!quiescence || (quiescence.idle_cycles_min <= 0 && quiescence.window_ms <= 0)) return true;
+  const idle = snapshot.scope_idle_cycles ?? 0;
+  const ageMs = snapshot.scope_last_delta_age_ms ?? 0;
+  return idle >= quiescence.idle_cycles_min && ageMs >= quiescence.window_ms;
+}
+
+async function emitSessionFinalized(scopeId: string): Promise<void> {
+  try {
+    const { appendEvent } = await import("./contextWal.js");
+    await appendEvent({ type: "session_finalized", scope_id: scopeId });
+  } catch {
+    // WAL may be unavailable
+  }
+}
+
+async function emitFinalityCertificate(scopeId: string): Promise<void> {
+  try {
+    const { buildCertificatePayload, signCertificate, persistCertificate } = await import("./finalityCertificates.js");
+    const payload = buildCertificatePayload(scopeId, "RESOLVED");
+    const jws = signCertificate(payload);
+    await persistCertificate(scopeId, jws, payload);
+  } catch {
+    // table or key may be unavailable
+  }
+}
+
 export async function evaluateFinality(scopeId: string): Promise<FinalityResult | null> {
   // Human-approved finality: skip re-HITL and treat as RESOLVED
   try {
     const { getLatestFinalityDecision } = await import("./finalityDecisions.js");
     const latest = await getLatestFinalityDecision(scopeId);
     if (latest?.option === "approve_finality") {
+      await emitSessionFinalized(scopeId);
+      await emitFinalityCertificate(scopeId);
       return { kind: "status", status: "RESOLVED" };
     }
   } catch {
@@ -321,6 +390,8 @@ export async function evaluateFinality(scopeId: string): Promise<FinalityResult 
       is_monotonic: convergence.is_monotonic,
       is_plateaued: convergence.is_plateaued,
       score_history: convergence.history.map((p) => p.goal_score),
+      trajectory_quality: convergence.trajectory_quality,
+      oscillation_detected: convergence.oscillation_detected,
     };
 
     // Divergence detection: V is increasing → system moving away from finality
@@ -333,12 +404,18 @@ export async function evaluateFinality(scopeId: string): Promise<FinalityResult 
 
   // Path A: RESOLVED if all hard conditions hold and goal score >= auto
   // Monotonicity gate (Aegean): require stable non-decreasing score for β rounds
+  // Gate C: trajectory quality >= 0.7 (no oscillation / spike-drop)
+  // Gate D: quiescence (idle_cycles + last_delta_age window) when configured
   const resolvedRule = config.finality?.RESOLVED;
   if (resolvedRule?.conditions?.length) {
     const conditions = resolvedRule.conditions.map(conditionToString);
     const allMet = resolvedRule.mode === "all" && conditions.every((c) => evaluateOne(c, snapshot));
     const isMonotonic = convergenceData?.is_monotonic ?? true; // default to true if no convergence data
-    if (allMet && goalScore >= auto && isMonotonic) {
+    const trajectoryOk = (convergenceData?.trajectory_quality ?? 1) >= 0.7;
+    const quiescent = isQuiescent(snapshot, config.quiescence);
+    if (allMet && goalScore >= auto && isMonotonic && trajectoryOk && quiescent) {
+      await emitSessionFinalized(scopeId);
+      await emitFinalityCertificate(scopeId);
       return { kind: "status", status: "RESOLVED" };
     }
   }

@@ -79,7 +79,7 @@ The convergence tracker (`src/convergenceTracker.ts`) transforms finality into a
 
 | Condition | Outcome |
 |-----------|---------|
-| Score >= 0.92, all RESOLVED conditions met, monotonicity gate satisfied | Auto-RESOLVED |
+| Score >= 0.92, all RESOLVED conditions met, monotonicity gate satisfied, trajectory quality >= 0.7 (Gate C), quiescence when configured (Gate D) | Auto-RESOLVED |
 | Convergence rate alpha < -0.05 (system diverging) | ESCALATED |
 | Score in [0.40, 0.92), plateau detected | HITL review with convergence context |
 | Score in [0.40, 0.92), not plateaued | ACTIVE (keep iterating) |
@@ -149,12 +149,12 @@ See [docs/demo.md](docs/demo.md) for the full walkthrough and [demo/DEMO.md](dem
 
 ## Validation
 
-**196 unit tests** (Vitest) cover convergence math, finality decision paths, governance rule evaluation, semantic graph monotonicity, and state machine CAS. **7 convergence benchmark scenarios** validate the tracker with pure math (no Docker, no LLM). An **E2E pipeline** (`scripts/run-e2e.sh`) tests the full Docker stack from document ingestion through governance to semantic graph verification. **Governance path auditing** seeds three proposal modes (MASTER/MITL/YOLO) and verifies the audit trail.
+**268 unit tests** (Vitest) cover convergence math, finality decision paths, governance rule evaluation, semantic graph monotonicity, state machine CAS, policy engine, finality certificates, and Gate B/C/D. **7 convergence benchmark scenarios** validate the tracker with pure math (no Docker, no LLM). An **E2E pipeline** (`scripts/run-e2e.sh`) tests the full Docker stack from document ingestion through governance to semantic graph verification. **Governance path auditing** seeds three proposal modes (MASTER/MITL/YOLO) and verifies the audit trail.
 
 **What's theoretical:** scalability beyond ~10 agents (architecture supports it, not stress-tested), multi-org OpenFGA isolation, long convergence runs over hundreds of epochs, adversarial robustness.
 
 ```bash
-pnpm run test                                  # 196 unit tests
+pnpm run test                                  # 268 unit tests
 npx tsx scripts/benchmark-convergence.ts       # 7 convergence scenarios
 ./scripts/run-e2e.sh                           # Full E2E pipeline
 ```
@@ -169,11 +169,13 @@ See [docs/validation.md](docs/validation.md) for the complete test methodology a
 
 **Context and state:** Postgres `context_events` (append-only WAL) and `swarm_state` (singleton, epoch CAS). S3 for facts, drift, and history.
 
-**Semantic graph:** Postgres `nodes` (type, scope, payload, optional embedding vector(1024)) and `edges` (source, target, edge_type). Synced from facts via monotonic upserts.
+**Semantic graph:** Postgres `nodes` and `edges` (optionally bitemporal: valid_from, valid_to, recorded_at, superseded_at per migration 011). Synced from facts via monotonic upserts; time-travel queries and append-over-update (supersede) supported.
 
 **Convergence history:** Postgres `convergence_history` (scope_id, epoch, goal_score, lyapunov_v, dimension_scores JSONB, pressure JSONB). Append-only.
 
-**Governance loop:** Planner proposes -> governance checks rules + OpenFGA -> executor performs approved advance. Every decision logged.
+**Governance loop:** Planner proposes -> policy engine (YAML or OPA-WASM) evaluates rules -> OpenFGA checks -> executor performs approved advance. Every decision persisted to `decision_records` with policy version; obligations executed via enforcer.
+
+**Finality certificates:** When a scope reaches RESOLVED, a signed JWS (Ed25519) is stored in `finality_certificates`. Summary API and `GET /finality-certificate/:scope_id` (MITL server) expose policy version and certificate for audit.
 
 **Finality:** After each governance round, `evaluateFinality(scopeId)` runs against the semantic graph and convergence history. Monotonicity gate + plateau detection + divergence detection.
 
@@ -207,7 +209,7 @@ docker compose up -d postgres s3 nats facts-worker feed
 pnpm install
 ```
 
-**Preflight** — ensures Postgres, S3, NATS, and facts-worker are reachable before starting. Use `CHECK_SERVICES_MAX_WAIT_SEC=300` on first run (facts-worker installs Python deps on startup):
+**Preflight** — ensures Postgres, S3, NATS, and facts-worker are reachable before starting. Use `CHECK_SERVICES_MAX_WAIT_SEC=300` on first run (facts-worker installs Python deps on startup). If checks fail, ensure Docker Compose is running (`docker compose up -d postgres s3 nats facts-worker feed`).
 
 ```bash
 CHECK_SERVICES_MAX_WAIT_SEC=300 pnpm run check:services
@@ -230,6 +232,9 @@ psql -h localhost -p 5433 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f migrations/00
 psql -h localhost -p 5433 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f migrations/008_mitl_pending.sql
 psql -h localhost -p 5433 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f migrations/009_processed_messages.sql
 psql -h localhost -p 5433 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f migrations/010_convergence_tracker.sql
+psql -h localhost -p 5433 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f migrations/011_bitemporal.sql
+psql -h localhost -p 5433 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f migrations/012_decision_records.sql
+psql -h localhost -p 5433 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f migrations/013_finality_certificates.sql
 ```
 
 **Seed, bootstrap, and launch:**
@@ -262,7 +267,7 @@ curl -s -X POST http://localhost:3002/context/docs \
 ./scripts/run-e2e.sh
 ```
 
-**Ports:** 3002 feed · 4222/8222 NATS · 5433 Postgres · 9000/9001 MinIO · 8010 facts-worker · 3001 MITL · 3000/8080 OpenFGA.
+**Ports:** 3002 feed · 4222/8222 NATS · 5433 Postgres · 9000/9001 MinIO · 8010 facts-worker · 3001 MITL (includes GET /finality-certificate/:scope_id) · 3000/8080 OpenFGA.
 
 ---
 
@@ -307,7 +312,7 @@ Set in `governance.yaml`:
 ## Tests
 
 ```bash
-pnpm run test          # 196 unit tests (Vitest); 15 integration tests (require Docker)
+pnpm run test          # 268 unit tests (Vitest); 15 integration tests (require Docker)
 pnpm run test:watch
 ```
 
@@ -331,6 +336,8 @@ pytest tests/ -v      # Python facts-worker unit + integration
 - **Tuner agent:** `AGENT_ROLE=tuner pnpm run swarm` optimizes activation filter configs via LLM.
 - **Pressure-directed activation:** Set filter type to `pressure_directed` in agent config. Agents activate based on convergence pressure.
 - **Observability:** Configure `OTEL_*` in `.env` for traces and metrics.
+- **Policy version and certificates:** Summary API (`GET /summary`) exposes `policy_version` (governance/finality config hashes) and `finality_certificate` when a scope has been resolved. MITL server exposes `GET /finality-certificate/:scope_id` for the latest signed certificate.
+- **OPA-WASM:** Build with `pnpm run build:opa` (requires OPA CLI); set `OPA_WASM_PATH` to use Rego policies instead of YAML. See `policies/README.md`.
 
 For current status, verified functionality, and next steps, see **STATUS.md**.
 
@@ -338,10 +345,12 @@ For current status, verified functionality, and next steps, see **STATUS.md**.
 
 ## Further reading
 
-- [docs/architecture.md](docs/architecture.md) — event bus internals, state machine, database schema, governance loop
-- [docs/convergence.md](docs/convergence.md) — formal convergence theory, configuration reference, benchmark scenarios
+- [docs/architecture.md](docs/architecture.md) — event bus internals, state machine, database schema, governance loop, policy engine, decision records, finality certificates
+- [docs/convergence.md](docs/convergence.md) — formal convergence theory, Gate C (oscillation, trajectory quality), configuration reference, benchmark scenarios
+- [docs/finality-design.md](docs/finality-design.md) — finality gates B/C/D, certificates, evidence coverage, implementation status
+- [docs/governance-design.md](docs/governance-design.md) — policy stack, OPA-WASM, obligations, combining algorithms
 - [docs/validation.md](docs/validation.md) — test methodology, what's proven vs theoretical, known gaps
-- [docs/demo.md](docs/demo.md) — Project Horizon M&A demo walkthrough
+- [docs/demo.md](docs/demo.md) — Project Horizon M&A demo walkthrough and explainability
 
 ---
 

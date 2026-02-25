@@ -8,10 +8,17 @@
  * - Stale nodes: marked "irrelevant" instead of deleted (append-only semantics)
  *
  * This guarantees the goal score is a ratchet — it only moves forward, never regresses.
+ *
+ * Policy versioning: decisions are linked to policy version (governance/finality config hash)
+ * via DecisionRecord.policy_version and finality certificate payloads (Phase 5-2, 8-5).
+ *
+ * Late-arriving facts: payloads with valid_from/valid_to in the past are stored as-is;
+ * they contribute to time-travel queries (queryNodes with asOfValidTime) and temporal
+ * contradiction uses overlap of valid-time intervals (Phase 8-2).
  */
 
+import { runInTransaction } from "./db.js";
 import {
-  runInTransaction,
   appendNode,
   appendEdge,
   updateNodeConfidence,
@@ -32,6 +39,9 @@ export interface FactsPayload {
   contradictions?: string[];
   goals?: string[];
   confidence?: number;
+  /** Bitemporal: valid time for all nodes/edges from this payload (optional). */
+  valid_from?: string | null;
+  valid_to?: string | null;
   [k: string]: unknown;
 }
 
@@ -113,6 +123,9 @@ export async function syncFactsToSemanticGraph(
     (c): c is string => typeof c === "string",
   );
   const confidence = typeof facts.confidence === "number" ? facts.confidence : 1;
+  const validFrom = facts.valid_from ?? undefined;
+  const validTo = facts.valid_to ?? undefined;
+  const hasValidTime = validFrom !== undefined || validTo !== undefined;
 
   let nodesCreated = 0;
   let nodesUpdated = 0;
@@ -160,6 +173,7 @@ export async function syncFactsToSemanticGraph(
             status: "active",
             source_ref: { source: "facts" },
             created_by: FACTS_SYNC_SOURCE,
+            ...(hasValidTime && { valid_from: validFrom ?? null, valid_to: validTo ?? null }),
           },
           client,
         );
@@ -188,6 +202,7 @@ export async function syncFactsToSemanticGraph(
             status: "active",
             source_ref: { source: "facts" },
             created_by: FACTS_SYNC_SOURCE,
+            ...(hasValidTime && { valid_from: validFrom ?? null, valid_to: validTo ?? null }),
           },
           client,
         );
@@ -212,6 +227,7 @@ export async function syncFactsToSemanticGraph(
             scope_id: scopeId,
             type: "risk",
             content: trimmed,
+            ...(hasValidTime && { valid_from: validFrom ?? null, valid_to: validTo ?? null }),
             status: "active",
             metadata: { severity: "high" },
             source_ref: { source: "facts" },
@@ -264,6 +280,7 @@ export async function syncFactsToSemanticGraph(
               weight: 1,
               metadata: { raw: str },
               created_by: FACTS_SYNC_SOURCE,
+              ...(hasValidTime && { valid_from: validFrom ?? null, valid_to: validTo ?? null }),
             },
             client,
           );

@@ -41,6 +41,13 @@ services:
       timeout: 5s
       retries: 5
 
+  # Optional: OPA server for policy bundle API (Phase 1 may use OPA-WASM in-process instead).
+  # opa:
+  #   image: openpolicyagent/opa:latest
+  #   command: run --server --log-level=info
+  #   ports:
+  #     - "8181:8181"
+
   openfga:
     image: openfga/openfga:latest
     command: run

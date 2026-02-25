@@ -62,6 +62,7 @@ def _get_program():
 def _call_openai_fallback(prompt_context: str, prompt_previous: str) -> str:
     """Use OpenAI client directly when DSPy LM is not available (e.g. in Docker). Uses Ollama when OLLAMA_BASE_URL is set."""
     from openai import OpenAI
+    timeout_sec = max(30, int(os.getenv("EXTRACTION_TIMEOUT_SEC", "180")))
     ollama_base = os.getenv("OLLAMA_BASE_URL", "").strip()
     if ollama_base:
         client = OpenAI(api_key="ollama", base_url=f"{ollama_base.rstrip('/')}/v1")
@@ -83,6 +84,7 @@ Extract structured facts. Reply with a single JSON object only (no markdown, no 
         model=model,
         messages=[{"role": "user", "content": user_content}],
         response_format={"type": "json_object"},
+        request_timeout=timeout_sec,
     )
     return (resp.choices[0].message.content or "{}").strip()
 

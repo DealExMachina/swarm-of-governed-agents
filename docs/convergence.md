@@ -187,6 +187,16 @@ highest_pressure_dimension = argmax_d( pressure_d )
 
 **Literature.** Dorigo, Theraulaz, & Trianni (2024) survey stigmergic coordination in swarm intelligence, where agents respond to environmental signals (pheromones, gradients) rather than explicit messages. Pressure-directed activation adapts this principle: the convergence state is the "pheromone map" and agents activate where pressure is highest.
 
+### 2.6 Gate C: Oscillation detection and trajectory quality
+
+**Definition.** Beyond monotonicity and plateau, the system detects **oscillation** (repeated direction changes in goal score or negative lag-1 autocorrelation) and computes a **trajectory quality** score in [0, 1]. Auto-RESOLVED additionally requires trajectory_quality >= 0.7 so that transient spikes or oscillating paths do not trigger resolution.
+
+**Oscillation.** Implemented via: (1) counting direction changes in the last N goal scores (two or more imply oscillation), and (2) lag-1 autocorrelation of the score series (below -0.3 implies oscillation). When either condition holds, `oscillation_detected` is true.
+
+**Trajectory quality.** Starts at 1; reduced by direction-change penalty and by a cap when oscillation (autocorrelation) is detected; further reduced when the latest score is well below the recent maximum (spike-and-drop). Used in the finality evaluator as a Gate C condition alongside monotonicity.
+
+**Coordination signal.** The convergence state exposes a minimal `coordination_signal` (signal_type, value, metadata) with highest_pressure_dimension, trajectory_quality, and oscillation_detected for downstream agents or explainability.
+
 ---
 
 ## 3. Integration with finality evaluator

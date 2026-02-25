@@ -1,0 +1,15 @@
+# Evidence schemas for Gate B (evidence coverage) and staleness.
+# Phase 0: stub. Phase 1: domain schemas with temporal_constraint; coverage computation.
+# See docs/finality-design.md and docs/dual-temporality-design.md.
+
+schemas:
+  # Example: required evidence types per domain (M&A due diligence).
+  default:
+    evidence_types: []
+    temporal_constraint:
+      max_age_days: null  # null = no staleness check
+  # Example with staleness (Phase 4).
+  # compliance_certificate:
+  #   evidence_types: [compliance_certificate]
+  #   temporal_constraint:
+  #     max_age_days: 365

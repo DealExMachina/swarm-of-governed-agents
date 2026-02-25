@@ -419,7 +419,7 @@ flowchart TD
   O3 --> PEND
 ```
 
-Quick checks (in order): proposed_action != advance_state → IGNORE; epoch mismatch → REJECT; canTransition blocked → PENDING; checkPermission denied → REJECT.
+Quick checks (in order): proposed_action != advance_state → IGNORE; epoch mismatch → REJECT; policy engine (transition) → PENDING if denied; checkPermission denied → REJECT. The **policy engine** (`src/policyEngine.ts`) is pluggable: default is YAML (`createYamlPolicyEngine` with governance config and policy version hash from `src/policyVersions.ts`); optional OPA-WASM (`src/opaPolicyEngine.ts`) when `OPA_WASM_PATH` is set. Each evaluation produces a `DecisionRecord` (decision_id, policy_version, result, reason, obligations); records are persisted to `decision_records` and obligations are executed via `src/obligationEnforcer.ts`. Combining algorithms (`denyOverrides`, `firstApplicable`) in `src/combiningAlgorithms.ts` support multi-policy evaluation.
 
 ### Oversight agent
 
@@ -696,6 +696,53 @@ to `scope_id = 'default'`.
 
 **Indexes:** `idx_convergence_history_scope` (scope_id, created_at DESC),
 `idx_convergence_history_scope_epoch` (scope_id, epoch DESC).
+
+### Migration 011: bitemporal (nodes and edges)
+
+**File:** `migrations/011_bitemporal.sql`
+
+Adds valid time and transaction time to the semantic graph: `valid_from`, `valid_to`, `recorded_at`, `superseded_at` on both `nodes` and `edges`. The "current" view is `superseded_at IS NULL AND (valid_to IS NULL OR valid_to > now())`. Supports time-travel queries (`asOfValidTime`, `asOfRecordedAt`) and append-over-update via `supersedeNode` / `supersedeEdge`.
+
+### Migration 012: decision_records
+
+**File:** `migrations/012_decision_records.sql`
+
+| Table | Purpose |
+|-------|---------|
+| decision_records | Governance decision audit with policy version |
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGSERIAL PK | Auto-incrementing |
+| decision_id | TEXT | Unique decision UUID |
+| timestamp | TIMESTAMPTZ | Decision time |
+| policy_version | TEXT | Config hash (e.g. governance.yaml SHA-256) |
+| result | TEXT | allow \| deny |
+| reason | TEXT | Human-readable rationale |
+| obligations | JSONB | Obligations from policy (default []) |
+| binding | TEXT | Engine identifier (yaml, opa) |
+| suggested_actions | JSONB | Optional suggested actions |
+| created_at | TIMESTAMPTZ | Insert time |
+
+**Indexes:** `idx_decision_records_ts`, `idx_decision_records_policy_version`.
+
+### Migration 013: finality_certificates
+
+**File:** `migrations/013_finality_certificates.sql`
+
+| Table | Purpose |
+|-------|---------|
+| finality_certificates | Signed JWS certificates when scope reaches RESOLVED |
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGSERIAL PK | Auto-incrementing |
+| scope_id | TEXT | Scope identifier |
+| certificate_jws | TEXT | Compact JWS (Ed25519) |
+| payload | JSONB | Decoded payload (scope_id, decision, timestamp, policy_version_hashes) |
+| created_at | TIMESTAMPTZ | Insert time |
+
+**Indexes:** `idx_finality_certificates_scope`, `idx_finality_certificates_created`. MITL server exposes `GET /finality-certificate/:scope_id` for the latest certificate.
 
 ### Additional runtime-created tables
 

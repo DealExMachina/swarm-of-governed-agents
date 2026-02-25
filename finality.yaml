@@ -15,6 +15,11 @@ convergence:
   history_depth: 20          # Convergence points to keep in analysis window
   divergence_rate: -0.05     # Convergence rate α below this triggers divergence alert
 
+# Gate D: quiescence. Set idle_cycles_min > 0 and/or window_ms > 0 to require stability before RESOLVED.
+quiescence:
+  idle_cycles_min: 0         # 0 = not required
+  window_ms: 0               # 0 = not required
+
 finality:
   RESOLVED:
     mode: all

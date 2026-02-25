@@ -10,23 +10,24 @@ Governed agent swarm: event-driven agents (facts, drift, planner, status) consum
 
 **Core**
 
-- Context WAL (`context_events`), state graph (`swarm_state`). Migrations 002 (context_wal), 003 (swarm_state), 005 (semantic_graph), 006 (scope_finality_decisions), 007 (swarm_state_scope), 008 (mitl_pending), 009 (processed_messages), 010 (convergence_tracker). **ensure-schema** runs all in order; **run-e2e.sh** runs 002/003/005/006.
+- Context WAL (`context_events`), state graph (`swarm_state`). Migrations 002–010 plus 011 (bitemporal), 012 (decision_records), 013 (finality_certificates). **ensure-schema** runs all in order; **run-e2e.sh** runs 002/003/005/006.
 - NATS JetStream stream, four agents (facts, drift, planner, status), governance agent, executor.
-- Governance rules (`governance.yaml`), OpenFGA policy checks, MITL server (approve/reject/options).
+- Governance rules (`governance.yaml`), **policy engine** (YAML default; OPA-WASM implementation in `opaPolicyEngine.ts` but not wired at runtime), **decision records** persisted to `decision_records` with policy version hash, **obligation enforcer** (executeObligations after each decision), **combining algorithms** (denyOverrides, firstApplicable). OpenFGA policy checks. MITL server (approve/reject/options, **GET /finality-certificate/:scope_id**).
 - Facts agent: readContext -> facts-worker `/extract` -> writeFacts to S3. Direct pipeline and optional Mastra orchestration.
-- Feed server (port 3002): summary, POST context/docs, POST context/resolution, **GET /convergence?scope=** for convergence state.
+- Feed server (port 3002): summary (policy_version, finality_certificate, convergence with trajectory_quality/oscillation_detected), POST context/docs, POST context/resolution, **GET /convergence?scope=** for convergence state.
 - Docker Compose: Postgres (pgvector image), MinIO, NATS, facts-worker, OpenFGA, feed, otel-collector.
 
 **Finality and semantic layer**
 
-- **finality.yaml**: goal gradient weights, RESOLVED/ESCALATED/BLOCKED/EXPIRED conditions, optional convergence config (beta, tau, ema_alpha, plateau_threshold, history_depth, divergence_rate).
-- **finalityEvaluator.ts**: `evaluateFinality(scopeId)` uses `loadFinalitySnapshot(scopeId)` and **convergence state**: auto RESOLVED when score >= threshold and monotonicity gate satisfied; ESCALATED when divergence detected; HITL review when near-finality or plateaued. Respects **finalityDecisions.ts** (approve_finality -> RESOLVED short-circuit).
-- **convergenceTracker.ts**: Lyapunov V(t), convergence rate alpha, monotonicity gate (beta rounds), plateau detection (EMA progress ratio, tau rounds), pressure-directed dimensions. Persists to `convergence_history` (migration 010). Pure analysis + DB persistence.
+- **finality.yaml**: goal gradient weights, RESOLVED/ESCALATED/BLOCKED/EXPIRED conditions, convergence config, **quiescence** (Gate D: idle_cycles_min, window_ms; 0/0 = disabled).
+- **finalityEvaluator.ts**: `evaluateFinality(scopeId)` uses `loadFinalitySnapshot(scopeId)` and **convergence state**: auto RESOLVED when score >= threshold, monotonicity gate, **Gate C** (trajectory_quality >= 0.7), **Gate D** (quiescent when configured); ESCALATED when divergence detected; HITL review when near-finality or plateaued. Emits **session_finalized** to context WAL and **finality certificate** (JWS) on RESOLVED. Respects **finalityDecisions.ts** (approve_finality -> RESOLVED short-circuit).
+- **convergenceTracker.ts**: Lyapunov V(t), convergence rate alpha, monotonicity gate (beta), plateau detection (EMA, tau), pressure-directed dimensions, **Gate C**: oscillation detection (direction changes, lag-1 autocorrelation), trajectory_quality, coordination_signal. Persists to `convergence_history` (migration 010). Pure analysis + DB persistence.
+- **finalityCertificates.ts**: buildCertificatePayload, signCertificate (Ed25519 JWS), verifyCertificate, persistCertificate, getLatestCertificate. Migration 013.
 - **hitlFinalityRequest.ts**: build HITL request with convergence context (rate, ETA, bottleneck dimension, score history), call Ollama for explanation, POST to MITL.
 - **mitlServer.ts**: `finality_review` multi-option responses and NATS events.
 - **governanceAgent.ts**: after each proposal handling, fire-and-forget `runFinalityCheck(SCOPE_ID)`; uses `SCOPE_ID` from env.
-- **migrations/005_semantic_graph.sql**: `vector` extension, `nodes` (with `embedding vector(1024)`), `edges`, indexes, `nodes_notify` trigger.
-- **semanticGraph.ts**: `appendNode` / `appendEdge`, `queryNodes` / `queryEdges`, `loadFinalitySnapshot(scopeId)`, `runInTransaction`, `deleteNodesBySource`.
+- **migrations/005_semantic_graph.sql**, **011_bitemporal.sql**: nodes/edges with optional valid_from, valid_to, recorded_at, superseded_at. Current view and time-travel (asOfValidTime, asOfRecordedAt); **supersedeNode** / **supersedeEdge** for append-over-update.
+- **semanticGraph.ts**: `appendNode` / `appendEdge` (optional valid time), `queryNodes` / `queryEdges` (optional time-travel), `loadFinalitySnapshot(scopeId)` (contradiction_mass, evidence_coverage; temporal contradiction = overlap of valid-time intervals), `getEvidenceCoverageForScope` (evidence_schemas.yaml, optional max_age_days staleness), `deleteNodesBySource`. Transaction helper: `runInTransaction` from `db.js`.
 - **embeddingPipeline.ts**: `getEmbedding` (Ollama bge-m3), `updateNodeEmbedding`, `embedAndPersistNode`.
 - **factsToSemanticGraph.ts**: `syncFactsToSemanticGraph(scopeId, facts)`: replace fact-sourced nodes/edges for scope, insert claim/goal/risk nodes and contradiction edges; optional `embedClaims` (FACTS_SYNC_EMBED=1).
 - **factsAgent writeFacts**: after S3 write, calls `syncFactsToSemanticGraph(scopeId, facts)`; sync failure is logged, S3 write still succeeds.
@@ -43,7 +44,7 @@ Governed agent swarm: event-driven agents (facts, drift, planner, status) consum
 - Migrations 002–010 applied via ensure-schema; Postgres + pgvector and tables `context_events`, `swarm_state`, `nodes`/`edges`, `scope_finality_decisions`, `convergence_history`, etc. present.
 - `loadFinalitySnapshot('default')` runs against real DB; Ollama (bge-m3) returns 1024-d embeddings.
 - Script `scripts/test-postgres-ollama.ts` (pnpm run test:postgres-ollama) exercises Postgres + Ollama.
-- **Unit tests**: 196 passing (semanticGraph, finalityEvaluator, convergenceTracker, finalityDecisions, governanceAgent finality, factsToSemanticGraph, embeddingPipeline, hitlFinalityRequest, activationFilters, etc.).
+- **Unit tests**: 268 passing (semanticGraph, finalityEvaluator, convergenceTracker, finalityDecisions, governanceAgent, policyEngine, policyVersions, combiningAlgorithms, finalityCertificates, obligationEnforcer, factsToSemanticGraph, embeddingPipeline, hitlFinalityRequest, activationFilters, etc.).
 - **Convergence benchmark**: `npx tsx scripts/benchmark-convergence.ts` — 7 scenarios (pure math, no Docker) for Lyapunov, monotonicity, plateau, divergence.
 
 ## HITL seed scenario
@@ -96,5 +97,5 @@ Every proposal decision written to the WAL includes `governance_path` when appli
 
 1. **E2E run**: With Postgres (ensure-schema or E2E subset), MinIO, NATS, and facts-worker up, run seed + bootstrap + swarm:all; POST a doc; verify facts in S3 and nodes/edges in DB; run `pnpm run test:postgres-ollama` (optional: FACTS_SYNC_EMBED=1 for embeddings).
 2. **Resolutions -> goals**: When handling POST /context/resolution, optionally create or update goal nodes (e.g. one goal "User resolution" with status resolved) or map resolution text to existing goals so finality sees higher goal completion.
-3. **HITL UX**: Expose finality review in the feed UI or a small CLI so operators can approve/reject/defer when finality triggers HITL (summary and GET /convergence already expose convergence state).
-4. **Observability**: Finality outcome is logged; GET /convergence and summary expose convergence state. Optional: dedicated /finality endpoint or summary metrics for last outcome (RESOLVED / review_requested / ESCALATED).
+3. **HITL UX**: Feed UI and MITL server already support finality review; GET /finality-certificate/:scope_id exposes latest certificate for resolved scopes.
+4. **Observability**: Finality outcome is logged; GET /convergence and summary expose convergence state, policy version, and certificate summary. Summary API and demo docs include an Explainability subsection (see demo/DEMO.md, docs/demo.md).

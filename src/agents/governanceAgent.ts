@@ -7,7 +7,11 @@ import { z } from "zod";
 import { Agent } from "@mastra/core/agent";
 import { s3GetText } from "../s3.js";
 import { loadState } from "../stateGraph.js";
-import { loadPolicies, getGovernanceForScope, canTransition } from "../governance.js";
+import { loadPolicies, getGovernanceForScope } from "../governance.js";
+import { createYamlPolicyEngine, type PolicyEngine } from "../policyEngine.js";
+import { getGovernancePolicyVersion } from "../policyVersions.js";
+import { persistDecisionRecord } from "../decisionRecorder.js";
+import { executeObligations } from "../obligationEnforcer.js";
 import { checkPermission } from "../policy.js";
 import { appendEvent } from "../contextWal.js";
 import { addPending } from "../mitlServer.js";
@@ -264,8 +268,22 @@ function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
       if (from === undefined || to === undefined) {
         return { allowed: false, reason: "missing_from_or_to" };
       }
-      const decision = canTransition(from, to, drift, governance);
-      return { allowed: decision.allowed, reason: decision.reason };
+      const policyVersion = getGovernancePolicyVersion(govPath);
+      const engine = createYamlPolicyEngine(governance, policyVersion);
+      const result = await engine.evaluate({
+        scope_id: SCOPE_ID,
+        from_state: from,
+        to_state: to,
+        drift_level: drift.level,
+        drift_types: drift.types,
+      });
+      try {
+        await persistDecisionRecord(result.record);
+      } catch {
+        // table may not exist or DB unavailable
+      }
+      await executeObligations(result.record.obligations ?? []);
+      return { allowed: result.allowed, reason: result.record.reason };
     },
   });
   const checkPolicyTool = createTool({
@@ -307,9 +325,23 @@ function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
       if (from === undefined || to === undefined) {
         return { ok: false, error: "missing_from_or_to" };
       }
-      const decision = canTransition(from, to, drift, governance);
-      if (!decision.allowed) {
-        return { ok: false, error: decision.reason };
+      const policyVersion = getGovernancePolicyVersion(govPath);
+      const engine = createYamlPolicyEngine(governance, policyVersion);
+      const policyResultTransition = await engine.evaluate({
+        scope_id: SCOPE_ID,
+        from_state: from,
+        to_state: to,
+        drift_level: drift.level,
+        drift_types: drift.types,
+      });
+      try {
+        await persistDecisionRecord(policyResultTransition.record);
+      } catch {
+        // table may not exist or DB unavailable
+      }
+      await executeObligations(policyResultTransition.record.obligations ?? []);
+      if (!policyResultTransition.allowed) {
+        return { ok: false, error: policyResultTransition.record.reason };
       }
       const policyResult = await checkPermission(proposal.agent, "writer", proposal.target_node);
       if (!policyResult.allowed) {
@@ -468,14 +500,29 @@ export async function evaluateProposalDeterministic(
     };
   }
 
-  const decision = canTransition(from, to, drift, governance);
-  if (!decision.allowed) {
+  const policyVersion = getGovernancePolicyVersion(govPath);
+  const engine: PolicyEngine = createYamlPolicyEngine(governance, policyVersion);
+  const policyContext = {
+    scope_id: SCOPE_ID,
+    from_state: from,
+    to_state: to,
+    drift_level: drift.level,
+    drift_types: drift.types,
+  };
+  const policyResult = await engine.evaluate(policyContext);
+  try {
+    await persistDecisionRecord(policyResult.record);
+  } catch {
+    // table may not exist or DB unavailable
+  }
+  await executeObligations(policyResult.record.obligations ?? []);
+  if (!policyResult.allowed) {
     // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'governanceAgent:evaluateProposal',message:'drift-block-escalated-to-HITL',data:{from,to,drift_level:drift.level,drift_types:drift.types,reason:decision.reason,expectedEpoch},timestamp:Date.now()})}).catch(()=>{});
+    fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'governanceAgent:evaluateProposal',message:'drift-block-escalated-to-HITL',data:{from,to,drift_level:drift.level,drift_types:drift.types,reason:policyResult.record.reason,expectedEpoch},timestamp:Date.now()})}).catch(()=>{});
     // #endregion
     return {
       outcome: "pending",
-      reason: decision.reason,
+      reason: policyResult.record.reason,
       actionPayload: {
         expectedEpoch,
         runId: state.runId,
@@ -484,16 +531,16 @@ export async function evaluateProposalDeterministic(
         type: "governance_review",
         drift_level: drift.level,
         drift_types: drift.types,
-        block_reason: decision.reason,
+        block_reason: policyResult.record.reason,
       },
     };
   }
 
-  const policyResult = await checkPermission(agent, "writer", target_node);
-  if (!policyResult.allowed) {
+  const permissionResult = await checkPermission(agent, "writer", target_node);
+  if (!permissionResult.allowed) {
     return {
       outcome: "reject",
-      reason: policyResult.error ?? "policy_denied",
+      reason: permissionResult.error ?? "policy_denied",
       actionPayload: { expectedEpoch, runId: state.runId, from, to },
     };
   }

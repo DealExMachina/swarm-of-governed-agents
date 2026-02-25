@@ -494,6 +494,19 @@ Set `FACTS_SYNC_EMBED=1` in `.env` and ensure Ollama is serving `bge-m3`. Claim 
 
 ---
 
+## Explainability
+
+The summary API and demo UI expose governance and finality context so reviewers can see why the system reached its state:
+
+| Element | Where it appears | Meaning |
+|---|---|---|
+| **Policy version** | `GET /summary` → `finality.policy_version`; feed dashboard | Content hashes of `governance.yaml` and `finality.yaml`. Decisions and certificates reference these so you can reproduce which policy was in effect. |
+| **Finality certificate** | `GET /summary` → `finality.finality_certificate`; `GET /finality-certificate/:scope_id` (MITL server) | When a scope reaches RESOLVED, a signed JWS certificate is stored. The summary shows decision and timestamp; the MITL endpoint returns the full JWS and payload for verification. |
+| **Convergence (Gate C)** | `GET /summary` → `finality.convergence` | Trajectory quality (0–100%), oscillation detected flag, and estimated rounds to auto-resolve. Explains whether the score path is stable or fluctuating. |
+| **Temporal context** | Bitemporal schema (migration 011) | Claims and edges can carry `valid_from` / `valid_to`. Contradictions count only when valid-time intervals overlap. Time-travel queries (`asOfValidTime`) support historical views. |
+
+---
+
 ## File reference
 
 | Path | Purpose |

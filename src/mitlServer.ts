@@ -226,6 +226,22 @@ export function startMitlServer(port: number): void {
       }
       return;
     }
+    const matchCert = url.match(/^\/finality-certificate\/([^/]+)$/);
+    if (method === "GET" && matchCert) {
+      try {
+        const { getLatestCertificate } = await import("./finalityCertificates.js");
+        const scopeId = decodeURIComponent(matchCert[1]);
+        const cert = await getLatestCertificate(scopeId);
+        if (!cert) {
+          send(404, { error: "no_certificate", scope_id: scopeId });
+          return;
+        }
+        send(200, { scope_id: scopeId, certificate_jws: cert.certificate_jws, payload: cert.payload });
+      } catch (e) {
+        send(500, { error: String(e) });
+      }
+      return;
+    }
     if (method === "POST" && match) {
       if (!requireBearer(req, res)) return;
       const result = await approvePending(match[1]);

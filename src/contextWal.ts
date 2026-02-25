@@ -13,19 +13,18 @@ export function _resetTableEnsured(): void {
   _tableEnsured = false;
 }
 
+const SCHEMA_REQUIRED_MSG =
+  "Table context_events does not exist. Run schema migrations first (e.g. pnpm run ensure-schema or pnpm run swarm:all).";
+
 export async function ensureContextTable(pool?: pg.Pool): Promise<void> {
   if (_tableEnsured) return;
   const p = pool ?? getPool();
-  await p.query(`
-    CREATE TABLE IF NOT EXISTS context_events (
-      seq  BIGSERIAL PRIMARY KEY,
-      ts   TIMESTAMPTZ NOT NULL DEFAULT now(),
-      data JSONB NOT NULL
-    )
-  `);
-  await p.query(
-    "CREATE INDEX IF NOT EXISTS idx_context_events_ts ON context_events (ts)",
+  const res = await p.query(
+    "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'context_events'",
   );
+  if ((res.rowCount ?? 0) === 0) {
+    throw new Error(SCHEMA_REQUIRED_MSG);
+  }
   _tableEnsured = true;
 }
 

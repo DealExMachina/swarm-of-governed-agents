@@ -1,5 +1,24 @@
 import logging
+import os
 import traceback
+from pathlib import Path
+
+# Load .env from project root so OPENAI_API_KEY, OPENAI_BASE_URL, OLLAMA_BASE_URL, etc. are available when running locally
+def _load_dotenv():
+    try:
+        from dotenv import load_dotenv
+        # app.py lives in workers/facts-worker/; project root is two levels up
+        root = Path(__file__).resolve().parent.parent.parent
+        env_path = root / ".env"
+        if env_path.is_file():
+            load_dotenv(env_path)
+            logging.getLogger(__name__).debug("Loaded .env from %s", env_path)
+    except ImportError:
+        pass
+
+
+_load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel

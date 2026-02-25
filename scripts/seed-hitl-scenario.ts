@@ -10,30 +10,32 @@
  * Usage: npm run seed:hitl
  */
 import "dotenv/config";
+import { runInTransaction } from "../src/db.js";
 import {
-  runInTransaction,
   deleteNodesBySource,
   appendNode,
   appendEdge,
 } from "../src/semanticGraph.js";
+import {
+  CLAIMS,
+  GOALS,
+  RISKS,
+  CONTRADICTION_EDGES,
+  RESOLUTION_EDGES,
+  EXPECTED_NODE_COUNT,
+  EXPECTED_EDGE_COUNT,
+  HITL_CREATED_BY,
+} from "../src/seed-data/hitl-scenario.js";
 
 const SCOPE_ID = process.env.SCOPE_ID ?? "default";
-const CREATED_BY = "seed-hitl-scenario";
 
 async function main(): Promise<void> {
   const { nodesCreated, edgesCreated } = await runInTransaction(async (client) => {
-    const deleted = await deleteNodesBySource(SCOPE_ID, CREATED_BY, client);
+    const deleted = await deleteNodesBySource(SCOPE_ID, HITL_CREATED_BY, client);
     if (deleted > 0) console.log("Removed", deleted, "existing seed-hitl-scenario nodes");
 
     const claimIds: string[] = [];
-    const claims = [
-      "Budget is approved for Q4.",
-      "Launch date is set to November 15.",
-      "We will hire 15 engineers by year-end.",
-      "SOC 2 audit is scheduled for November.",
-      "Nexus APAC rollout is delayed by 2 weeks.",
-    ];
-    for (const content of claims) {
+    for (const content of CLAIMS) {
       const nodeId = await appendNode(
         {
           scope_id: SCOPE_ID,
@@ -42,21 +44,14 @@ async function main(): Promise<void> {
           confidence: 0.9,
           status: "active",
           source_ref: { source: "seed-hitl-scenario" },
-          created_by: CREATED_BY,
+          created_by: HITL_CREATED_BY,
         },
         client,
       );
       claimIds.push(nodeId);
     }
 
-    const goals = [
-      { content: "Complete Nexus rollout in APAC", status: "resolved" as const },
-      { content: "Pass SOC 2 audit", status: "resolved" as const },
-      { content: "Hire 15+ engineers by Dec 31", status: "resolved" as const },
-      { content: "Close two enterprise logos", status: "resolved" as const },
-      { content: "Achieve 50 Nexus deployments by end of 2025", status: "active" as const },
-    ];
-    for (const g of goals) {
+    for (const g of GOALS) {
       await appendNode(
         {
           scope_id: SCOPE_ID,
@@ -64,17 +59,13 @@ async function main(): Promise<void> {
           content: g.content,
           status: g.status,
           source_ref: { source: "seed-hitl-scenario" },
-          created_by: CREATED_BY,
+          created_by: HITL_CREATED_BY,
         },
         client,
       );
     }
 
-    const risks = [
-      "Talent market may delay hiring.",
-      "APAC delay may shift revenue to Q1.",
-    ];
-    for (const content of risks) {
+    for (const content of RISKS) {
       await appendNode(
         {
           scope_id: SCOPE_ID,
@@ -83,54 +74,42 @@ async function main(): Promise<void> {
           status: "active",
           metadata: { severity: "high" },
           source_ref: { source: "seed-hitl-scenario" },
-          created_by: CREATED_BY,
+          created_by: HITL_CREATED_BY,
         },
         client,
       );
     }
 
-    // Two contradiction pairs; one will be "resolved" so one stays unresolved
-    await appendEdge(
-      {
-        scope_id: SCOPE_ID,
-        source_id: claimIds[0],
-        target_id: claimIds[2],
-        edge_type: "contradicts",
-        weight: 1,
-        metadata: { raw: "Budget approved vs hire 15 (stretch)" },
-        created_by: CREATED_BY,
-      },
-      client,
-    );
-    await appendEdge(
-      {
-        scope_id: SCOPE_ID,
-        source_id: claimIds[1],
-        target_id: claimIds[4],
-        edge_type: "contradicts",
-        weight: 1,
-        metadata: { raw: "Launch Nov 15 vs APAC delayed" },
-        created_by: CREATED_BY,
-      },
-      client,
-    );
-    // Resolve the first contradiction only
-    await appendEdge(
-      {
-        scope_id: SCOPE_ID,
-        source_id: claimIds[0],
-        target_id: claimIds[2],
-        edge_type: "resolves",
-        weight: 1,
-        metadata: { note: "Resolution: budget supports 15 stretch target" },
-        created_by: CREATED_BY,
-      },
-      client,
-    );
+    for (const e of CONTRADICTION_EDGES) {
+      await appendEdge(
+        {
+          scope_id: SCOPE_ID,
+          source_id: claimIds[e.sourceIndex],
+          target_id: claimIds[e.targetIndex],
+          edge_type: "contradicts",
+          weight: 1,
+          metadata: { raw: e.raw },
+          created_by: HITL_CREATED_BY,
+        },
+        client,
+      );
+    }
+    for (const e of RESOLUTION_EDGES) {
+      await appendEdge(
+        {
+          scope_id: SCOPE_ID,
+          source_id: claimIds[e.sourceIndex],
+          target_id: claimIds[e.targetIndex],
+          edge_type: "resolves",
+          weight: 1,
+          metadata: { note: e.note },
+          created_by: HITL_CREATED_BY,
+        },
+        client,
+      );
+    }
 
-    const nodesCreated = 5 + 5 + 2;
-    const edgesCreated = 3;
-    return { nodesCreated, edgesCreated };
+    return { nodesCreated: EXPECTED_NODE_COUNT, edgesCreated: EXPECTED_EDGE_COUNT };
   });
 
   console.log("HITL seed scenario ready.", "Scope:", SCOPE_ID, "| Nodes:", nodesCreated, "| Edges:", edgesCreated);

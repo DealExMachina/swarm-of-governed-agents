@@ -1,6 +1,6 @@
 import pg from "pg";
 import type { FinalitySnapshot } from "./finalityEvaluator.js";
-import { getPool, runInTransaction } from "./db.js";
+import { getPool } from "./db.js";
 
 export interface SemanticNode {
   node_id: string;
@@ -39,12 +39,16 @@ export interface AppendNodeInput {
   metadata?: Record<string, unknown>;
   created_by?: string;
   embedding?: number[] | null;
+  /** Bitemporal: valid time interval (optional; null = atemporal). */
+  valid_from?: string | null;
+  valid_to?: string | null;
 }
 
 type Queryable = pg.Pool | pg.PoolClient;
 
-// runInTransaction is now imported from db.ts — re-export for backward compatibility
-export { runInTransaction } from "./db.js";
+/** Bitemporal "current" view: not superseded and (valid now or open-ended). Use in node/edge SELECTs when migration 011 is applied. */
+const CURRENT_VIEW_NODES = "superseded_at IS NULL AND (valid_to IS NULL OR valid_to > now())";
+const CURRENT_VIEW_EDGES = "superseded_at IS NULL AND (valid_to IS NULL OR valid_to > now())";
 
 /** Delete nodes (and their edges via FK CASCADE) by scope and created_by. Returns deleted count. */
 export async function deleteNodesBySource(
@@ -69,6 +73,30 @@ export async function appendNode(
     input.embedding && input.embedding.length > 0
       ? `[${input.embedding.join(",")}]`
       : null;
+  const hasBitemporal = input.valid_from !== undefined || input.valid_to !== undefined;
+  const validFrom = input.valid_from ?? null;
+  const validTo = input.valid_to ?? null;
+  if (hasBitemporal) {
+    const res = await p.query(
+      `INSERT INTO nodes (scope_id, type, content, confidence, status, source_ref, metadata, created_by, embedding, valid_from, valid_to)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::vector, $10::timestamptz, $11::timestamptz)
+       RETURNING node_id`,
+      [
+        input.scope_id,
+        input.type,
+        input.content,
+        input.confidence ?? 1.0,
+        input.status ?? "active",
+        JSON.stringify(input.source_ref ?? {}),
+        JSON.stringify(input.metadata ?? {}),
+        input.created_by ?? null,
+        embeddingParam,
+        validFrom,
+        validTo,
+      ],
+    );
+    return res.rows[0].node_id;
+  }
   const res = await p.query(
     `INSERT INTO nodes (scope_id, type, content, confidence, status, source_ref, metadata, created_by, embedding)
      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::vector)
@@ -96,6 +124,9 @@ export interface AppendEdgeInput {
   weight?: number;
   metadata?: Record<string, unknown>;
   created_by?: string;
+  /** Bitemporal: valid time interval (optional; null = atemporal). */
+  valid_from?: string | null;
+  valid_to?: string | null;
 }
 
 export async function appendEdge(
@@ -103,6 +134,28 @@ export async function appendEdge(
   client?: pg.PoolClient,
 ): Promise<string> {
   const p: Queryable = client ?? getPool();
+  const hasBitemporal = input.valid_from !== undefined || input.valid_to !== undefined;
+  const validFrom = input.valid_from ?? null;
+  const validTo = input.valid_to ?? null;
+  if (hasBitemporal) {
+    const res = await p.query(
+      `INSERT INTO edges (scope_id, source_id, target_id, edge_type, weight, metadata, created_by, valid_from, valid_to)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::timestamptz, $9::timestamptz)
+       RETURNING edge_id`,
+      [
+        input.scope_id,
+        input.source_id,
+        input.target_id,
+        input.edge_type,
+        input.weight ?? 1.0,
+        JSON.stringify(input.metadata ?? {}),
+        input.created_by ?? null,
+        validFrom,
+        validTo,
+      ],
+    );
+    return res.rows[0].edge_id;
+  }
   const res = await p.query(
     `INSERT INTO edges (scope_id, source_id, target_id, edge_type, weight, metadata, created_by)
      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
@@ -120,11 +173,88 @@ export async function appendEdge(
   return res.rows[0].edge_id;
 }
 
+/**
+ * Append-over-update: mark the current row as superseded (sets superseded_at).
+ * Call this before inserting a new version of the same logical node.
+ * No-op if the row is already superseded. Requires migration 011.
+ */
+export async function supersedeNode(
+  scopeId: string,
+  nodeId: string,
+  client?: pg.PoolClient,
+): Promise<number> {
+  const q: Queryable = client ?? getPool();
+  const res = await q.query(
+    `UPDATE nodes SET superseded_at = now() WHERE scope_id = $1 AND node_id = $2 AND superseded_at IS NULL`,
+    [scopeId, nodeId],
+  );
+  return res.rowCount ?? 0;
+}
+
+/**
+ * Append-over-update: mark the current edge row as superseded.
+ * Requires migration 011.
+ */
+export async function supersedeEdge(
+  scopeId: string,
+  edgeId: string,
+  client?: pg.PoolClient,
+): Promise<number> {
+  const q: Queryable = client ?? getPool();
+  const res = await q.query(
+    `UPDATE edges SET superseded_at = now() WHERE scope_id = $1 AND edge_id = $2 AND superseded_at IS NULL`,
+    [scopeId, edgeId],
+  );
+  return res.rowCount ?? 0;
+}
+
 export interface QueryNodesOptions {
   scope_id: string;
   type?: string;
   status?: string;
   limit?: number;
+  /** Time-travel: as-of valid time (ISO). When set, only rows valid at this time. */
+  asOfValidTime?: string;
+  /** Time-travel: as-of transaction time (ISO). When set, only rows recorded and not superseded at this time. */
+  asOfRecordedAt?: string;
+}
+
+function buildNodeViewCondition(opts: QueryNodesOptions, params: unknown[], startIdx: number): { clause: string; nextIdx: number } {
+  let idx = startIdx;
+  if (opts.asOfValidTime || opts.asOfRecordedAt) {
+    const parts: string[] = [];
+    if (opts.asOfValidTime) {
+      parts.push(`valid_from <= $${idx}::timestamptz AND (valid_to IS NULL OR valid_to > $${idx}::timestamptz)`);
+      params.push(opts.asOfValidTime);
+      idx++;
+    }
+    if (opts.asOfRecordedAt) {
+      parts.push(`recorded_at <= $${idx}::timestamptz AND (superseded_at IS NULL OR superseded_at > $${idx}::timestamptz)`);
+      params.push(opts.asOfRecordedAt);
+      idx++;
+    }
+    return { clause: "(" + parts.join(" AND ") + ")", nextIdx: idx };
+  }
+  return { clause: `(${CURRENT_VIEW_NODES})`, nextIdx: idx };
+}
+
+function buildEdgeViewCondition(opts: QueryEdgesOptions, params: unknown[], startIdx: number): { clause: string; nextIdx: number } {
+  let idx = startIdx;
+  if (opts.asOfValidTime || opts.asOfRecordedAt) {
+    const parts: string[] = [];
+    if (opts.asOfValidTime) {
+      parts.push(`valid_from <= $${idx}::timestamptz AND (valid_to IS NULL OR valid_to > $${idx}::timestamptz)`);
+      params.push(opts.asOfValidTime);
+      idx++;
+    }
+    if (opts.asOfRecordedAt) {
+      parts.push(`recorded_at <= $${idx}::timestamptz AND (superseded_at IS NULL OR superseded_at > $${idx}::timestamptz)`);
+      params.push(opts.asOfRecordedAt);
+      idx++;
+    }
+    return { clause: "(" + parts.join(" AND ") + ")", nextIdx: idx };
+  }
+  return { clause: `(${CURRENT_VIEW_EDGES})`, nextIdx: idx };
 }
 
 export async function queryNodes(opts: QueryNodesOptions): Promise<SemanticNode[]> {
@@ -140,6 +270,9 @@ export async function queryNodes(opts: QueryNodesOptions): Promise<SemanticNode[
     conditions.push(`status = $${i++}`);
     params.push(opts.status);
   }
+  const { clause, nextIdx } = buildNodeViewCondition(opts, params, i);
+  i = nextIdx;
+  conditions.push(clause);
   const limit = Math.min(opts.limit ?? 500, 5000);
   params.push(limit);
   const res = await p.query(
@@ -170,6 +303,10 @@ export interface QueryEdgesOptions {
   source_id?: string;
   target_id?: string;
   limit?: number;
+  /** Time-travel: as-of valid time (ISO). */
+  asOfValidTime?: string;
+  /** Time-travel: as-of transaction time (ISO). */
+  asOfRecordedAt?: string;
 }
 
 export async function queryEdges(opts: QueryEdgesOptions): Promise<SemanticEdge[]> {
@@ -189,6 +326,9 @@ export async function queryEdges(opts: QueryEdgesOptions): Promise<SemanticEdge[
     conditions.push(`target_id = $${i++}`);
     params.push(opts.target_id);
   }
+  const edgeView = buildEdgeViewCondition(opts, params, i);
+  i = edgeView.nextIdx;
+  conditions.push(edgeView.clause);
   const limit = Math.min(opts.limit ?? 500, 5000);
   params.push(limit);
   const res = await p.query(
@@ -221,13 +361,14 @@ export async function loadFinalitySnapshot(scopeId: string): Promise<FinalitySna
        COUNT(*) FILTER (WHERE type = 'claim' AND status = 'active')::int AS claims_active_count,
        COALESCE(AVG(confidence) FILTER (WHERE type = 'claim' AND status = 'active'), 1)::float AS claims_active_avg_confidence,
        COUNT(*) FILTER (WHERE type = 'risk' AND status = 'active' AND (metadata->>'severity') = 'critical')::int AS risks_critical_active_count
-     FROM nodes WHERE scope_id = $1`,
+     FROM nodes WHERE scope_id = $1 AND (${CURRENT_VIEW_NODES})`,
     [scopeId],
   );
   const row = nodeRes.rows[0] ?? {};
 
   const claimsCount = Number(row.claims_active_count ?? 0);
   if (claimsCount === 0) {
+    const evidence_coverage = await getEvidenceCoverageForScope(scopeId, p);
     return {
       claims_active_min_confidence: 0,
       claims_active_count: 0,
@@ -237,6 +378,8 @@ export async function loadFinalitySnapshot(scopeId: string): Promise<FinalitySna
       risks_critical_active_count: 0,
       goals_completion_ratio: 0,
       scope_risk_score: 0,
+      contradiction_mass: 0,
+      evidence_coverage,
     };
   }
 
@@ -244,7 +387,7 @@ export async function loadFinalitySnapshot(scopeId: string): Promise<FinalitySna
     `SELECT
        COUNT(*) FILTER (WHERE type = 'goal' AND status = 'resolved')::int AS resolved,
        COUNT(*) FILTER (WHERE type = 'goal')::int AS total
-     FROM nodes WHERE scope_id = $1`,
+     FROM nodes WHERE scope_id = $1 AND (${CURRENT_VIEW_NODES})`,
     [scopeId],
   );
   const goalRow = goalRes.rows[0] ?? {};
@@ -253,24 +396,44 @@ export async function loadFinalitySnapshot(scopeId: string): Promise<FinalitySna
 
   const assessmentRes = await p.query(
     `SELECT COALESCE(SUM((metadata->>'risk_delta')::float), 0)::float AS risk_score
-     FROM nodes WHERE scope_id = $1 AND type = 'assessment' AND status = 'active'`,
+     FROM nodes WHERE scope_id = $1 AND type = 'assessment' AND status = 'active' AND (${CURRENT_VIEW_NODES})`,
     [scopeId],
   );
   const scopeRiskScore = Math.min(1, Math.max(0, Number(assessmentRes.rows[0]?.risk_score ?? 0)));
 
   const contraRes = await p.query(
-    `SELECT COUNT(*)::int AS total FROM edges WHERE scope_id = $1 AND edge_type = 'contradicts'`,
+    `SELECT COUNT(*)::int AS total FROM edges e
+     JOIN nodes n1 ON n1.node_id = e.source_id AND n1.scope_id = e.scope_id AND n1.superseded_at IS NULL
+     JOIN nodes n2 ON n2.node_id = e.target_id AND n2.scope_id = e.scope_id AND n2.superseded_at IS NULL
+     WHERE e.scope_id = $1 AND e.edge_type = 'contradicts' AND e.superseded_at IS NULL AND (e.valid_to IS NULL OR e.valid_to > now())
+     AND (
+       (n1.valid_from IS NULL AND n1.valid_to IS NULL) OR (n2.valid_from IS NULL AND n2.valid_to IS NULL)
+       OR (n1.valid_from < COALESCE(n2.valid_to, 'infinity'::timestamptz) AND n2.valid_from < COALESCE(n1.valid_to, 'infinity'::timestamptz))
+     )`,
     [scopeId],
   );
   const contradictionsTotal = Number(contraRes.rows[0]?.total ?? 0);
 
+  // Unresolved contradictions: no resolving edge AND valid-time overlap (or both atemporal).
   const unresolvedRes = await p.query(
     `SELECT COUNT(*)::int AS c FROM edges e
-     WHERE e.scope_id = $1 AND e.edge_type = 'contradicts'
-     AND NOT EXISTS (SELECT 1 FROM edges r WHERE r.scope_id = e.scope_id AND r.edge_type = 'resolves' AND (r.target_id = e.source_id OR r.target_id = e.target_id))`,
+     JOIN nodes n1 ON n1.node_id = e.source_id AND n1.scope_id = e.scope_id AND n1.superseded_at IS NULL
+     JOIN nodes n2 ON n2.node_id = e.target_id AND n2.scope_id = e.scope_id AND n2.superseded_at IS NULL
+     WHERE e.scope_id = $1 AND e.edge_type = 'contradicts' AND e.superseded_at IS NULL AND (e.valid_to IS NULL OR e.valid_to > now())
+     AND (
+       (n1.valid_from IS NULL AND n1.valid_to IS NULL) OR (n2.valid_from IS NULL AND n2.valid_to IS NULL)
+       OR (n1.valid_from < COALESCE(n2.valid_to, 'infinity'::timestamptz) AND n2.valid_from < COALESCE(n1.valid_to, 'infinity'::timestamptz))
+     )
+     AND NOT EXISTS (SELECT 1 FROM edges r WHERE r.scope_id = e.scope_id AND r.edge_type = 'resolves' AND r.superseded_at IS NULL AND (r.valid_to IS NULL OR r.valid_to > now()) AND (r.target_id = e.source_id OR r.target_id = e.target_id))`,
     [scopeId],
   );
   const contradictionsUnresolved = Number(unresolvedRes.rows[0]?.c ?? contradictionsTotal);
+
+  // Gate B: contradiction mass (severity weight per unresolved; default 1.0 each).
+  const contradiction_mass = contradictionsUnresolved * 1.0;
+
+  // Gate B: evidence coverage from schema (default 1 if no schema or no required types).
+  const evidence_coverage = await getEvidenceCoverageForScope(scopeId, p);
 
   return {
     claims_active_min_confidence: Number(row.claims_active_min_confidence ?? 1),
@@ -281,7 +444,43 @@ export async function loadFinalitySnapshot(scopeId: string): Promise<FinalitySna
     risks_critical_active_count: Number(row.risks_critical_active_count ?? 0),
     goals_completion_ratio: goalsCompletionRatio,
     scope_risk_score: scopeRiskScore,
+    contradiction_mass,
+    evidence_coverage,
   };
+}
+
+/** Load evidence_schemas and compute coverage ratio for scope (0-1). Returns 1 if no schema. Uses max_age_days for staleness when set. */
+async function getEvidenceCoverageForScope(
+  scopeId: string,
+  p: pg.Pool,
+): Promise<number> {
+  try {
+    const { readFileSync } = await import("fs");
+    const { join } = await import("path");
+    const { parse: parseYaml } = await import("yaml");
+    const path = join(process.cwd(), "evidence_schemas.yaml");
+    const raw = readFileSync(path, "utf-8");
+    const schemas = parseYaml(raw) as {
+      schemas?: Record<string, { evidence_types?: string[]; temporal_constraint?: { max_age_days?: number | null } }>;
+    };
+    const defaultSchema = schemas?.schemas?.default;
+    const required = defaultSchema?.evidence_types ?? [];
+    if (required.length === 0) return 1;
+    const maxAgeDays = defaultSchema?.temporal_constraint?.max_age_days;
+    let sql = `SELECT type, COUNT(*)::int AS c FROM nodes WHERE scope_id = $1 AND (${CURRENT_VIEW_NODES})`;
+    const params: unknown[] = [scopeId];
+    if (maxAgeDays != null && maxAgeDays > 0) {
+      sql += ` AND (valid_to IS NULL OR valid_to >= now() - ($2 || ' days')::interval)`;
+      params.push(String(maxAgeDays));
+    }
+    sql += " GROUP BY type";
+    const typeRes = await p.query(sql, params);
+    const present = new Set(typeRes.rows.map((r) => String(r.type)));
+    const found = required.filter((t) => present.has(t)).length;
+    return found / required.length;
+  } catch {
+    return 1;
+  }
 }
 
 /**
@@ -348,7 +547,7 @@ export async function hasResolvingEdge(
   const q: Queryable = client ?? getPool();
   const res = await q.query(
     `SELECT 1 FROM edges
-     WHERE scope_id = $1 AND edge_type = 'resolves'
+     WHERE scope_id = $1 AND edge_type = 'resolves' AND (${CURRENT_VIEW_EDGES})
      AND (target_id = $2 OR target_id = $3)
      LIMIT 1`,
     [scopeId, sourceId, targetId],
@@ -370,6 +569,7 @@ export async function queryNodesByCreator(
     conditions.push("type = $3");
     params.push(type);
   }
+  conditions.push(`(${CURRENT_VIEW_NODES})`);
   const res = await q.query(
     `SELECT node_id, scope_id, type, content, confidence, status, source_ref, metadata, created_at, updated_at, created_by, version
      FROM nodes WHERE ${conditions.join(" AND ")}
@@ -396,14 +596,14 @@ export async function queryNodesByCreator(
 export async function getGraphSummary(scopeId: string): Promise<{ nodes: Record<string, number>; edges: Record<string, number> }> {
   const p = getPool();
   const nodeRes = await p.query(
-    `SELECT type, COUNT(*)::int AS c FROM nodes WHERE scope_id = $1 GROUP BY type`,
+    `SELECT type, COUNT(*)::int AS c FROM nodes WHERE scope_id = $1 AND (${CURRENT_VIEW_NODES}) GROUP BY type`,
     [scopeId],
   );
   const nodes: Record<string, number> = {};
   for (const r of nodeRes.rows) nodes[String(r.type)] = Number(r.c ?? 0);
 
   const edgeRes = await p.query(
-    `SELECT edge_type, COUNT(*)::int AS c FROM edges WHERE scope_id = $1 GROUP BY edge_type`,
+    `SELECT edge_type, COUNT(*)::int AS c FROM edges WHERE scope_id = $1 AND (${CURRENT_VIEW_EDGES}) GROUP BY edge_type`,
     [scopeId],
   );
   const edges: Record<string, number> = {};

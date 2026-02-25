@@ -366,4 +366,43 @@ describe("analyzeConvergence", () => {
       expect(state.highest_pressure_dimension).toBe("contradiction_resolution");
     });
   });
+
+  describe("Gate C: oscillation and trajectory quality", () => {
+    it("returns oscillation_detected false and high trajectory_quality for monotonic history", () => {
+      const history = makeImprovingHistory(6, 0.5, 0.9);
+      const state = analyzeConvergence(history);
+      expect(state.oscillation_detected).toBe(false);
+      expect(state.trajectory_quality).toBeGreaterThanOrEqual(0.8);
+      expect(state.autocorrelation_lag1).not.toBeNull();
+    });
+
+    it("detects oscillation when direction changes >= 2", () => {
+      const history: ConvergencePoint[] = [
+        makePoint({ epoch: 1, goal_score: 0.70 }),
+        makePoint({ epoch: 2, goal_score: 0.75 }),
+        makePoint({ epoch: 3, goal_score: 0.72 }),
+        makePoint({ epoch: 4, goal_score: 0.76 }),
+        makePoint({ epoch: 5, goal_score: 0.73 }),
+      ];
+      const state = analyzeConvergence(history);
+      expect(state.oscillation_detected).toBe(true);
+      expect(state.trajectory_quality).toBeLessThan(1);
+    });
+
+    it("sets coordination_signal with metadata", () => {
+      const history = makeImprovingHistory(4, 0.6, 0.85);
+      const state = analyzeConvergence(history);
+      expect(state.coordination_signal).toBeDefined();
+      expect(state.coordination_signal?.signal_type).toBe("convergence");
+      expect(state.coordination_signal?.metadata).toHaveProperty("highest_pressure_dimension");
+      expect(state.coordination_signal?.metadata).toHaveProperty("trajectory_quality");
+      expect(state.coordination_signal?.metadata).toHaveProperty("oscillation_detected");
+    });
+
+    it("returns autocorrelation_lag1 null for fewer than 4 points", () => {
+      const history = makeImprovingHistory(3, 0.5, 0.7);
+      const state = analyzeConvergence(history);
+      expect(state.autocorrelation_lag1).toBeNull();
+    });
+  });
 });

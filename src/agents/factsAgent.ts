@@ -7,6 +7,12 @@ import { toErrorString } from "../errors.js";
 import { s3GetText, s3PutJson } from "../s3.js";
 import { tailEvents } from "../contextWal.js";
 
+/** Default 4 min: later demo steps (e.g. Market Intelligence) send large context; worker/LLM can be slow under load. */
+const FACTS_WORKER_TIMEOUT_MS = Math.max(
+  15000,
+  parseInt(process.env.FACTS_WORKER_TIMEOUT_MS ?? "240000", 10) || 240000,
+);
+
 function getFactsWorkerUrl(): string {
   const url = process.env.FACTS_WORKER_URL;
   if (!url) throw new Error("FACTS_WORKER_URL is required for facts agent");
@@ -55,16 +61,23 @@ function createFactsTools(
       drift: z.record(z.unknown()),
     }),
     execute: async ({ context }) => {
-      const resp = await fetch(`${getFactsWorkerUrl()}/extract`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          context: context.context,
-          previous_facts: context.previous_facts,
-        }),
-      });
-      if (!resp.ok) throw new Error(await resp.text());
-      return (await resp.json()) as { facts: Record<string, unknown>; drift: Record<string, unknown> };
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), FACTS_WORKER_TIMEOUT_MS);
+      try {
+        const resp = await fetch(`${getFactsWorkerUrl()}/extract`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            context: context.context,
+            previous_facts: context.previous_facts,
+          }),
+          signal: controller.signal,
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        return (await resp.json()) as { facts: Record<string, unknown>; drift: Record<string, unknown> };
+      } finally {
+        clearTimeout(timeoutId);
+      }
     },
   });
 
