@@ -67,70 +67,114 @@ export async function buildRankedQuestions(scopeId: string): Promise<WatchdogQue
 
   const questions: WatchdogQuestion[] = [];
 
-  for (const dim of dims) {
-    const gap = 1 - dim.score;
-    if (gap < 0.05) continue;
-    const potential_gain = gap * dim.weight;
+  // Phase ordering: contradictions first (they undermine trust), then low-confidence
+  // claims (need confirmation), then unresolved goals (need decisions).
+  // Within each phase, sort by potential finality gain.
+  const PHASE_ORDER: Record<string, number> = {
+    contradiction_resolution: 0,
+    claim_confidence: 1,
+    goal_completion: 2,
+    risk_score_inverse: 3,
+  };
 
-    if (dim.name === "goal_completion" && gap > 0) {
-      const goalRows = await pool.query(
-        `SELECT content, status FROM nodes
-         WHERE scope_id = $1 AND type = 'goal'
-         AND superseded_at IS NULL AND (valid_to IS NULL OR valid_to > now())
-         ORDER BY created_at`,
-        [scopeId],
-      );
-      const unresolved = goalRows.rows.filter((r: { status: string }) => r.status !== "resolved");
-      for (const g of unresolved) {
+  // --- Phase 0: Contradictions (resolve conflicting facts first) ---
+  const contraGap = 1 - contraScore;
+  if (contraGap > 0.01 && snapshot.contradictions_unresolved_count > 0) {
+    const contraNodes = await pool.query(
+      `SELECT DISTINCT n1.content AS claim_a, n2.content AS claim_b
+       FROM edges e
+       JOIN nodes n1 ON n1.node_id = e.source_id AND n1.scope_id = e.scope_id AND n1.superseded_at IS NULL
+       JOIN nodes n2 ON n2.node_id = e.target_id AND n2.scope_id = e.scope_id AND n2.superseded_at IS NULL
+       WHERE e.scope_id = $1 AND e.edge_type = 'contradicts' AND e.superseded_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM edges r WHERE r.scope_id = e.scope_id AND r.edge_type = 'resolves'
+         AND r.superseded_at IS NULL AND (r.target_id = e.source_id OR r.target_id = e.target_id))
+       LIMIT 5`,
+      [scopeId],
+    );
+    if (contraNodes.rowCount && contraNodes.rowCount > 0) {
+      for (const row of contraNodes.rows) {
+        const r = row as { claim_a: string; claim_b: string };
         questions.push({
-          dimension: "goal_completion",
-          current_score: goalScore,
-          weight: weights.goal_completion,
-          potential_gain,
-          question: `Goal not resolved: "${(g as { content: string }).content}". Can you confirm this is addressed or provide a resolution?`,
+          dimension: "contradiction_resolution",
+          current_score: contraScore,
+          weight: weights.contradiction_resolution,
+          potential_gain: contraGap * weights.contradiction_resolution,
+          question: `Contradiction: "${r.claim_a.slice(0, 80)}" vs "${r.claim_b.slice(0, 80)}". Which is correct, or how should this be reconciled?`,
           suggested_action: "provide_resolution",
-          priority: potential_gain > 0.15 ? "critical" : "high",
+          priority: "critical",
         });
       }
-    }
-
-    if (dim.name === "claim_confidence" && gap > 0.1) {
-      const lowClaims = await pool.query(
-        `SELECT content, confidence FROM nodes
-         WHERE scope_id = $1 AND type = 'claim' AND status = 'active'
-         AND confidence < 0.85
-         AND superseded_at IS NULL AND (valid_to IS NULL OR valid_to > now())
-         ORDER BY confidence ASC LIMIT 5`,
-        [scopeId],
-      );
-      for (const c of lowClaims.rows) {
-        const row = c as { content: string; confidence: number };
-        questions.push({
-          dimension: "claim_confidence",
-          current_score: claimScore,
-          weight: weights.claim_confidence,
-          potential_gain,
-          question: `Low-confidence claim (${Math.round(row.confidence * 100)}%): "${row.content.slice(0, 120)}". Can you confirm or refute this?`,
-          suggested_action: "provide_resolution",
-          priority: potential_gain > 0.15 ? "high" : "medium",
-        });
-      }
-    }
-
-    if (dim.name === "contradiction_resolution" && gap > 0) {
+    } else {
       questions.push({
         dimension: "contradiction_resolution",
         current_score: contraScore,
         weight: weights.contradiction_resolution,
-        potential_gain,
+        potential_gain: contraGap * weights.contradiction_resolution,
         question: `${snapshot.contradictions_unresolved_count} unresolved contradiction(s) remain. Which version of the conflicting facts should be authoritative?`,
         suggested_action: "provide_resolution",
-        priority: potential_gain > 0.15 ? "critical" : "high",
+        priority: "critical",
       });
     }
   }
 
-  questions.sort((a, b) => b.potential_gain - a.potential_gain);
+  // --- Phase 1: Low-confidence claims (confirm or refute shaky figures) ---
+  const claimGap = 1 - claimScore;
+  if (claimGap > 0.05) {
+    const lowClaims = await pool.query(
+      `SELECT content, confidence FROM nodes
+       WHERE scope_id = $1 AND type = 'claim' AND status = 'active'
+       AND confidence < 0.85
+       AND superseded_at IS NULL AND (valid_to IS NULL OR valid_to > now())
+       ORDER BY confidence ASC LIMIT 5`,
+      [scopeId],
+    );
+    for (const c of lowClaims.rows) {
+      const row = c as { content: string; confidence: number };
+      questions.push({
+        dimension: "claim_confidence",
+        current_score: claimScore,
+        weight: weights.claim_confidence,
+        potential_gain: claimGap * weights.claim_confidence,
+        question: `Low-confidence claim (${Math.round(row.confidence * 100)}%): "${row.content.slice(0, 120)}". Can you confirm or refute this figure?`,
+        suggested_action: "provide_resolution",
+        priority: claimGap > 0.3 ? "critical" : "high",
+      });
+    }
+  }
+
+  // --- Phase 2: Unresolved goals (need decisions) ---
+  const goalGap = 1 - goalScore;
+  if (goalGap > 0.01) {
+    const goalRows = await pool.query(
+      `SELECT content, status FROM nodes
+       WHERE scope_id = $1 AND type = 'goal'
+       AND status != 'resolved'
+       AND superseded_at IS NULL AND (valid_to IS NULL OR valid_to > now())
+       ORDER BY created_at`,
+      [scopeId],
+    );
+    for (const g of goalRows.rows) {
+      const row = g as { content: string; status: string };
+      const label = row.status === "in_progress" ? "In progress" : "Not resolved";
+      questions.push({
+        dimension: "goal_completion",
+        current_score: goalScore,
+        weight: weights.goal_completion,
+        potential_gain: goalGap * weights.goal_completion,
+        question: `${label}: "${row.content.slice(0, 100)}". Can you confirm this is addressed or provide a decision?`,
+        suggested_action: "provide_resolution",
+        priority: goalGap > 0.5 ? "critical" : "high",
+      });
+    }
+  }
+
+  // Sort: phase order first (contradictions -> claims -> goals), then by potential gain within phase
+  questions.sort((a, b) => {
+    const pa = PHASE_ORDER[a.dimension] ?? 9;
+    const pb = PHASE_ORDER[b.dimension] ?? 9;
+    if (pa !== pb) return pa - pb;
+    return b.potential_gain - a.potential_gain;
+  });
   return questions;
 }
 
