@@ -19,7 +19,9 @@ Step 1 — Temporal drift: Compare current facts against historical facts. If hi
 
 Step 2 — Intra-batch drift: Even if there is no history or history matches current, analyze the current facts for INTERNAL inconsistencies. Look for claims that contradict each other (e.g. one claim says ARR is 50M while another says 38M), goals that conflict with identified risks, or facts from different sources that disagree. This is critical when multiple documents are ingested at once.
 
-Step 3 — Classify: drift level (none, low, medium, high) and types (factual, goal, contradiction, entropy). If you find ANY contradictions within the facts — even without history — drift level should be at least "medium". Provide brief reasoning and cite sources with references (type, doc, excerpt).
+Step 3 — Consider resolutions: If contradictions have been addressed by human resolutions (e.g. "ARR confirmed at 38M"), the contradiction is resolved and should NOT count as drift. Only count contradictions that remain genuinely unresolved.
+
+Step 4 — Classify: drift level (none, low, medium, high) and types (factual, goal, contradiction, entropy). If contradictions exist but have been resolved by human input, drift should decrease. If ALL contradictions are resolved, remove "contradiction" from types. Provide brief reasoning and cite sources with references (type, doc, excerpt).
 
 Use tools: readFacts, readFactsHistory, readCurrentDrift, then writeDrift with your analysis.`;
 
@@ -124,25 +126,113 @@ export async function runDriftAgent(
   const facts = factsRaw ? (JSON.parse(factsRaw) as Record<string, unknown>) : null;
 
   const intraBatch = detectIntraBatchDrift(facts);
+  const graphState = await getGraphResolutionState();
 
   const driftRaw = await s3GetText(s3, bucket, KEY_DRIFT);
   const existing = driftRaw
     ? (JSON.parse(driftRaw) as { level: string; types: string[]; notes?: string[] })
     : null;
 
-  const drift = intraBatch.hasContradictions
+  const base = intraBatch.hasContradictions
     ? {
         level: intraBatch.level,
         types: intraBatch.types,
         notes: intraBatch.notes,
         references: intraBatch.references,
       }
-    : existing ?? { level: "none", types: [] as string[], notes: ["no drift yet"] };
+    : existing
+      ? { level: existing.level, types: existing.types, notes: existing.notes ?? [], references: undefined }
+      : { level: "none", types: [] as string[], notes: ["no drift yet"], references: undefined };
+  let drift: { level: string; types: string[]; notes: string[]; references?: Array<{ type: string; doc?: string; excerpt?: string }> } = {
+    level: base.level, types: base.types, notes: base.notes, references: base.references as Array<{ type: string; doc?: string; excerpt?: string }> | undefined,
+  };
+
+  drift = adjustDriftForResolutions(drift, graphState);
 
   const ts = new Date().toISOString();
   await s3PutJson(s3, bucket, KEY_DRIFT, drift);
   await s3PutJson(s3, bucket, KEY_DRIFT_HIST(ts), drift);
   return { wrote: [KEY_DRIFT, KEY_DRIFT_HIST(ts)], level: drift.level, types: drift.types };
+}
+
+interface GraphResolutionState {
+  contradictionsTotal: number;
+  contradictionsResolved: number;
+  goalsTotal: number;
+  goalsResolved: number;
+  goalsInProgress: number;
+}
+
+async function getGraphResolutionState(): Promise<GraphResolutionState> {
+  try {
+    const { getPool } = await import("../db.js");
+    const p = getPool();
+    const scopeId = process.env.SCOPE_ID ?? "default";
+    const contraRes = await p.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE type = 'contradiction')::int AS total,
+         COUNT(*) FILTER (WHERE type = 'contradiction' AND status != 'active')::int AS resolved
+       FROM nodes WHERE scope_id = $1 AND superseded_at IS NULL`,
+      [scopeId],
+    );
+    const goalRes = await p.query(
+      `SELECT
+         COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE status = 'resolved')::int AS resolved,
+         COUNT(*) FILTER (WHERE status = 'in_progress')::int AS in_progress
+       FROM nodes WHERE scope_id = $1 AND type = 'goal' AND superseded_at IS NULL`,
+      [scopeId],
+    );
+    const cr = contraRes.rows[0] ?? {};
+    const gr = goalRes.rows[0] ?? {};
+    return {
+      contradictionsTotal: Number(cr.total ?? 0),
+      contradictionsResolved: Number(cr.resolved ?? 0),
+      goalsTotal: Number(gr.total ?? 0),
+      goalsResolved: Number(gr.resolved ?? 0),
+      goalsInProgress: Number(gr.in_progress ?? 0),
+    };
+  } catch {
+    return { contradictionsTotal: 0, contradictionsResolved: 0, goalsTotal: 0, goalsResolved: 0, goalsInProgress: 0 };
+  }
+}
+
+/**
+ * Adjust drift level based on what's been resolved in the semantic graph.
+ * If contradictions are resolved, remove "contradiction" type and lower drift.
+ * If goals are progressing, remove "goal" type.
+ */
+function adjustDriftForResolutions(
+  drift: { level: string; types: string[]; notes: string[]; references?: Array<{ type: string; doc?: string; excerpt?: string }> },
+  graph: GraphResolutionState,
+): typeof drift {
+  const types = [...drift.types];
+  const notes = [...drift.notes];
+
+  const allContrasResolved = graph.contradictionsTotal > 0 && graph.contradictionsResolved >= graph.contradictionsTotal;
+  if (allContrasResolved && types.includes("contradiction")) {
+    types.splice(types.indexOf("contradiction"), 1);
+    notes.push(`All ${graph.contradictionsTotal} contradiction(s) resolved in the knowledge graph`);
+  }
+
+  const goalProgress = graph.goalsTotal > 0
+    ? (graph.goalsResolved + graph.goalsInProgress) / graph.goalsTotal
+    : 0;
+  if (goalProgress >= 0.5 && types.includes("goal")) {
+    types.splice(types.indexOf("goal"), 1);
+    notes.push(`Goals progressing: ${graph.goalsResolved} resolved, ${graph.goalsInProgress} in progress out of ${graph.goalsTotal}`);
+  }
+
+  let level = drift.level;
+  if (types.length === 0) {
+    level = "none";
+  } else if (types.length === 1 && !types.includes("contradiction")) {
+    level = level === "high" ? "medium" : level;
+  } else if (allContrasResolved && level === "high") {
+    level = "medium";
+  }
+
+  return { ...drift, level, types, notes };
 }
 
 /**

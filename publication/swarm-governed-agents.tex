@@ -39,7 +39,7 @@
 \maketitle
 
 \begin{abstract}
-The emergence of LLM-powered autonomous agents has exposed the limits of pipeline-based coordination: rigid DAGs cannot accommodate contradiction, evolving evidence, or formal convergence. We propose \emph{declarative governance over shared immutable context}, a paradigm where autonomous agents reason over a common semantic graph, propose state transitions, and reach consensus through formal convergence mechanisms---without predefined execution sequences. Three innovations enable this: (1) an append-only event log and CRDT-inspired semantic graph providing shared, monotonic context; (2) YAML-defined governance rules as coordination primitives, separating policy from agent implementation; (3) Lyapunov-based finality tracking with monotonicity gates, plateau detection, pressure-directed activation, and human-in-the-loop routing. Fine-grained access control (OpenFGA) governs agent execution, document access, and policy modification. Unlike orchestration frameworks (AutoGen, CrewAI, LangGraph) that wire agents into chains or graphs, our system lets agents independently reason over shared state and propose actions evaluated by declarative policy. Validation on a realistic M\&A due-diligence scenario (Project Horizon) demonstrates convergence in 12 rounds across 5 contradictory documents, with 83\% autonomous contradiction resolution, complete audit trail, and structured human review of residual disagreements.
+The emergence of LLM-powered autonomous agents has exposed the limits of pipeline-based coordination: rigid DAGs cannot accommodate contradiction, evolving evidence, or formal convergence. We propose \emph{declarative governance over shared immutable context}, a paradigm where autonomous agents reason over a common semantic graph, propose state transitions, and reach consensus through formal convergence mechanisms---without predefined execution sequences. Five architectural innovations enable this: (1) an append-only event log and a \emph{bitemporal} CRDT-inspired semantic graph---tracking both valid time (when a fact holds in the world) and transaction time (when the system recorded it)---providing shared, monotonic, temporally auditable context; (2) a pluggable policy engine (YAML and OPA-WASM backends) with XACML combining algorithms and immutable decision records, separating policy from agent implementation; (3) Lyapunov-based finality tracking with five gates---monotonicity, evidence coverage, oscillation detection (lag-1 autocorrelation), quiescence, and minimum content---plus pressure-directed activation and human-in-the-loop routing; (4) Ed25519-signed finality certificates embedding policy-version hashes for cryptographic non-repudiation; (5) three-tier governance routing (deterministic rules, oversight agent, full LLM) with circuit-breaker fallback ensuring continuous operation without LLM availability. Fine-grained access control (OpenFGA) governs agent execution, document access, and policy modification. Unlike orchestration frameworks (AutoGen, CrewAI, LangGraph) that wire agents into chains or graphs, our system lets agents independently reason over shared state and propose actions evaluated by declarative policy. Validation on a realistic M\&A due-diligence scenario (Project Horizon) demonstrates convergence in 12 rounds across 5 contradictory documents, with 83\% autonomous contradiction resolution, complete audit trail, and structured human review of residual disagreements. The resulting architecture is designed for regulated environments where temporal auditability, policy traceability, and cryptographic proof of finality are operational requirements.
 \end{abstract}
 
 %% ============================================================
@@ -158,6 +158,26 @@ A Postgres + pgvector database maintains semantic relationships with monotonic g
 \end{itemize}
 
 These CRDT semantics prevent state regression and enable formal convergence guarantees: the semantic graph can only move toward resolution, never away from it.
+
+\paragraph{Bitemporal Semantic Graph.}
+Beyond monotonic merge, the semantic graph implements \emph{dual temporality} \cite{snodgrass2000}: every node and edge carries two independent time axes.
+
+\begin{itemize}
+  \item \textbf{Valid time} (\texttt{valid\_from}, \texttt{valid\_to}): the interval during which a fact holds in the real world. A revenue figure may be valid for fiscal year 2024; a compliance certificate valid until its expiry date.
+  \item \textbf{Transaction time} (\texttt{recorded\_at}, \texttt{superseded\_at}): when the system learned or corrected the fact. A node superseded at $t_s$ remains in the graph with $\texttt{superseded\_at} = t_s$; its replacement carries $\texttt{recorded\_at} = t_s$.
+\end{itemize}
+
+The \emph{current view} filter---$\texttt{superseded\_at IS NULL} \wedge (\texttt{valid\_to IS NULL} \vee \texttt{valid\_to} > \texttt{now()})$---restricts queries to facts that are both temporally valid and not yet corrected. As-of queries on either axis or both enable point-in-time reconstruction:
+
+\begin{itemize}
+  \item \textbf{As-of valid time:} ``What was believed true on reporting date $T$?''
+  \item \textbf{As-of transaction time:} ``What did the system know at audit date $T'$?''
+  \item \textbf{Combined:} ``What did the system know at $T'$ about facts valid at $T$?''
+\end{itemize}
+
+Contradiction detection respects valid-time overlap: two claims contradict only if their validity windows intersect. A revenue figure valid in Q1 does not contradict a revised figure valid from Q2 onward. This prevents false contradictions from temporal misalignment and enables the finality evaluator to correctly assess unresolved disagreements.
+
+An \emph{evidence schema} declares required evidence types and maximum staleness per domain. Gate~B of the finality evaluator (Section~\ref{sec:finality-gates}) uses this schema to block finality when required evidence is missing or has exceeded its temporal validity---ensuring that decisions are not finalized on stale data.
 
 \subsection{Declarative Governance}
 
