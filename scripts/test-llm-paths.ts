@@ -6,13 +6,8 @@ import "dotenv/config";
 import { Agent } from "@mastra/core/agent";
 import { getChatModelConfig, getOllamaBaseUrl, getEmbeddingModel, getHitlModel } from "../src/modelConfig.js";
 
-const DBG = "http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3";
-function dbg(loc: string, msg: string, data: Record<string, unknown> = {}) {
-  fetch(DBG, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ location: loc, message: msg, data, timestamp: Date.now() }),
-  }).catch(() => {});
+function dbg(_loc: string, _msg: string, _data: Record<string, unknown> = {}) {
+  // Debug telemetry removed; use OpenTelemetry if needed.
 }
 
 async function testOllamaRaw() {

@@ -129,25 +129,14 @@ async function checkOllama(): Promise<string | null> {
   if (!base) return "OLLAMA_BASE_URL not set";
   const url = `${base.replace(/\/$/, "")}/api/tags`;
   const t0 = Date.now();
-  // #region agent log
-  fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'check-services.ts:checkOllama',message:'start',data:{url,timeoutMs:15000},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   try {
     const res = await fetch(url, {
       signal: AbortSignal.timeout(15000),
     });
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'check-services.ts:checkOllama',message:'ok',data:{status:res.status,elapsedMs:Date.now()-t0},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     if (res.ok) return null;
     return `HTTP ${res.status}`;
   } catch (e: any) {
     const errMsg = e instanceof Error ? e.message : String(e);
-    const cause = e?.cause ? (e.cause instanceof Error ? e.cause.message : String(e.cause)) : 'none';
-    const errName = e?.name ?? 'unknown';
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'check-services.ts:checkOllama',message:'error',data:{errName,errMsg,cause,elapsedMs:Date.now()-t0},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     return errMsg;
   }
 }
@@ -216,9 +205,6 @@ export async function checkAllServices(opts?: {
     if (round === 0) {
       console.error("Services not ready:");
       for (const r of failed) console.error(`  ${r.name}: ${r.err}`);
-      // #region agent log
-      fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'check-services.ts:retry-loop',message:'first-failure',data:{failed:failed.map(r=>({name:r.name,err:r.err})),round},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
     }
     console.error(`Retrying in ${Math.round(wait / 1000)}s...`);
     await sleep(wait);
@@ -226,9 +212,6 @@ export async function checkAllServices(opts?: {
 }
 
 async function main(): Promise<void> {
-  // #region agent log
-  fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'check-services.ts:main',message:'env-snapshot',data:{OLLAMA_BASE_URL:process.env.OLLAMA_BASE_URL,FACTS_WORKER_URL:process.env.FACTS_WORKER_URL,nodeVersion:process.version},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   const { ok, results } = await checkAllServices();
   if (ok) {
     const list = results.map((r) => r.name).join(", ");

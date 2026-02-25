@@ -73,9 +73,6 @@ const sseClients = new Set<ServerResponse>();
 
 function startSseProxy(): void {
   const feedEventUrl = new URL(`${FEED_URL}/events`);
-  // #region agent log
-  fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-server.ts:startSseProxy',message:'connecting',data:{hostname:feedEventUrl.hostname,port:feedEventUrl.port,path:feedEventUrl.pathname},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   const req = httpRequest(
     {
       hostname: feedEventUrl.hostname,
@@ -85,39 +82,24 @@ function startSseProxy(): void {
       headers: { Accept: "text/event-stream", "Cache-Control": "no-cache", ...authHeaders() },
     },
     (res) => {
-      // #region agent log
-      fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-server.ts:startSseProxy',message:'connected',data:{statusCode:res.statusCode,clients:sseClients.size},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       let chunkCount = 0;
       res.on("data", (chunk: Buffer) => {
         const text = chunk.toString();
         chunkCount++;
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-server.ts:startSseProxy',message:'chunk',data:{chunkCount,textLen:text.length,preview:text.slice(0,200),clients:sseClients.size},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
         for (const client of sseClients) {
           if (!client.writableEnded) client.write(text);
           else sseClients.delete(client);
         }
       });
       res.on("end", () => {
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-server.ts:startSseProxy',message:'end',data:{totalChunks:chunkCount},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
         setTimeout(startSseProxy, 3000);
       });
       res.on("error", (err) => {
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-server.ts:startSseProxy',message:'res-error',data:{error:String(err)},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
         setTimeout(startSseProxy, 3000);
       });
     },
   );
-  req.on("error", (err) => {
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-server.ts:startSseProxy',message:'req-error',data:{error:String(err)},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
+  req.on("error", (_err) => {
     setTimeout(startSseProxy, 3000);
   });
   req.end();
@@ -802,16 +784,10 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
   function handleEvent(evt) {
     var type = evt.type || '';
     var payload = evt.payload || {};
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-ui:handleEvent',message:'event-received',data:{type:type,payloadKeys:Object.keys(payload),currentStep:currentStep,stepSeen:stepSeen},timestamp:Date.now()})}).catch(function(){});
-    // #endregion
 
     if (type === 'facts_extracted' && !stepSeen.facts) {
       stepSeen.facts = true;
       resetStepTimeout();
-      // #region agent log
-      fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-ui:handleEvent',message:'facts_extracted payload',data:{payload:payload},timestamp:Date.now()})}).catch(function(){});
-      // #endregion
       var wrote = payload.wrote || [];
       appendToStage(agentCardHtml('F', 'Facts Agent', 'Facts extracted (' + wrote.length + ' keys written). Refreshing graph...', 'accent'));
       addActivity('Facts Agent: extraction complete', 'facts');
@@ -828,9 +804,6 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     if (type === 'drift_analyzed' && !stepSeen.drift) {
       stepSeen.drift = true;
       resetStepTimeout();
-      // #region agent log
-      fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-ui:handleEvent',message:'drift_analyzed payload',data:{payload:payload},timestamp:Date.now()})}).catch(function(){});
-      // #endregion
       var level = (payload.level || 'none').toUpperCase();
       var types = (payload.types || []).join(', ') || 'no specific types';
       var color = level === 'HIGH' ? 'red' : level === 'MEDIUM' ? 'amber' : 'green';
@@ -890,9 +863,6 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     }
 
     if (type === 'proposal_pending_approval' && !stepSeen.complete) {
-      // #region agent log
-      fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-ui:handleEvent',message:'proposal_pending_approval',data:{payload:payload,currentStep:currentStep,stepSeen:stepSeen},timestamp:Date.now()})}).catch(function(){});
-      // #endregion
       addActivity('Governance: review required', 'gov');
       if (stepTimeout) clearTimeout(stepTimeout);
       setTimeout(function() { pollGovernancePending(); }, 500);
@@ -1011,9 +981,6 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
 
   window.approveGovernance = async function(proposalId) {
     try {
-      // #region agent log
-      fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-ui:approveGovernance',message:'approving',data:{proposalId:proposalId},timestamp:Date.now()})}).catch(function(){});
-      // #endregion
       var r = await fetch('/api/approve/' + proposalId, { method: 'POST' });
       var result = await r.json();
       if (result.ok) {
@@ -1330,10 +1297,6 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
     var nn = sg.nodes || {};
     var dim = fin.dimensions || {};
     var drift = lastSummary.drift || {};
-
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'demo-ui:refreshSummary',message:'summary-data',data:{goal_score:fin.goal_score,dimensions:dim,nodes:nn,drift_level:drift&&drift.level,status:fin.status},timestamp:Date.now()})}).catch(function(){});
-    // #endregion
 
     // Finality score (right panel only)
     var gs = fin.goal_score != null ? Math.round(fin.goal_score * 100) : 0;

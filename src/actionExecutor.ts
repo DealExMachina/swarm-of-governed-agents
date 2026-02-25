@@ -204,9 +204,6 @@ async function executeActionInline(
   const { expectedEpoch } = payload;
   const scopeId = payload.scope_id ?? process.env.SCOPE_ID ?? "default";
   const isHumanOverride = action.approved_by === "human";
-  // #region agent log
-  fetch('http://127.0.0.1:7243/ingest/af5b746e-3a32-49ef-92b2-aa2d9876cfd3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'executor:executeActionInline',message:'executing',data:{proposal_id:action.proposal_id,isHumanOverride,expectedEpoch,approved_by:action.approved_by},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   let newState: GraphState | null;
   if (isHumanOverride) {
     newState = await advanceState(expectedEpoch, { scopeId });
