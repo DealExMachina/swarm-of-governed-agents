@@ -1,13 +1,9 @@
 import "dotenv/config";
 import { setMaxListeners } from "events";
-import { join } from "path";
 import type { S3Client } from "@aws-sdk/client-s3";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { Agent } from "@mastra/core/agent";
-import { loadState } from "../stateGraph.js";
-import { loadPolicies, getGovernanceForScope, canTransition } from "../governance.js";
-import { checkPermission } from "../policy.js";
 import { appendEvent } from "../contextWal.js";
 import { addPending } from "../mitlServer.js";
 import { isProcessed, markProcessed } from "../messageDedup.js";
@@ -16,23 +12,14 @@ import { logger, setLogContext } from "../logger.js";
 import { recordProposal, recordPolicyViolation } from "../metrics.js";
 import { getChatModelConfig, getOversightModelConfig } from "../modelConfig.js";
 import type { Proposal, Action } from "../events.js";
-import { makeReadGovernanceRulesTool, loadDrift, DRIFT_NONE } from "./sharedTools.js";
+import { createGovernanceTools } from "./governanceTools.js";
+import {
+  evaluateProposalDeterministic as evaluateProposalDeterministicImpl,
+  type DeterministicResult,
+} from "../governanceEvaluator.js";
 
-/** Result of deterministic governance evaluation (no side effects). */
-export interface DeterministicResult {
-  outcome: "approve" | "reject" | "pending" | "ignore";
-  reason: string;
-  actionPayload?: {
-    expectedEpoch: number;
-    runId: string;
-    from: string;
-    to: string;
-    type?: string;
-    drift_level?: string;
-    drift_types?: string[];
-    block_reason?: string;
-  };
-}
+/** Re-export for backward compatibility. */
+export type { DeterministicResult };
 
 /**
  * Audit path: which governance path produced the decision. Recorded in context_events for E2E and audits.
@@ -202,172 +189,6 @@ export async function runOversightAgent(
   }
 }
 
-function createGovernanceTools(proposal: Proposal, env: GovernanceAgentEnv) {
-  const { expectedEpoch, from, to } = (proposal.payload ?? {}) as {
-    expectedEpoch?: number;
-    from?: string;
-    to?: string;
-  };
-  let decided = false;
-  const readStateTool = createTool({
-    id: "readState",
-    description: "Read the current state graph state (runId, lastNode, epoch).",
-    inputSchema: z.object({}),
-    outputSchema: z.object({
-      state: z.object({
-        runId: z.string(),
-        lastNode: z.string(),
-        epoch: z.number(),
-        updatedAt: z.string(),
-      }).nullable(),
-    }),
-    execute: async () => {
-      const state = await loadState(SCOPE_ID);
-      return { state };
-    },
-  });
-  const readDriftTool = createTool({
-    id: "readDrift",
-    description: "Read the current drift analysis (level, types).",
-    inputSchema: z.object({}),
-    outputSchema: z.object({
-      drift: z.object({
-        level: z.string(),
-        types: z.array(z.string()),
-      }),
-    }),
-    execute: async () => {
-      const drift = (await loadDrift(env.s3, env.bucket)) ?? DRIFT_NONE;
-      return { drift };
-    },
-  });
-  const readGovernanceRules = makeReadGovernanceRulesTool();
-  const checkTransitionTool = createTool({
-    id: "checkTransition",
-    description: "Check if the proposed transition (from -> to) is allowed given current drift and governance rules.",
-    inputSchema: z.object({}),
-    outputSchema: z.object({
-      allowed: z.boolean(),
-      reason: z.string(),
-    }),
-    execute: async () => {
-      const drift = (await loadDrift(env.s3, env.bucket)) ?? DRIFT_NONE;
-      const govPath = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
-      const governance = getGovernanceForScope(SCOPE_ID, loadPolicies(govPath));
-      if (from === undefined || to === undefined) {
-        return { allowed: false, reason: "missing_from_or_to" };
-      }
-      const decision = canTransition(from, to, drift, governance);
-      return { allowed: decision.allowed, reason: decision.reason };
-    },
-  });
-  const checkPolicyTool = createTool({
-    id: "checkPolicy",
-    description: "Check if the proposing agent has permission to write to the target node.",
-    inputSchema: z.object({}),
-    outputSchema: z.object({
-      allowed: z.boolean(),
-      error: z.string().optional(),
-    }),
-    execute: async () => {
-      const result = await checkPermission(proposal.agent, "writer", proposal.target_node);
-      return { allowed: result.allowed, error: result.error };
-    },
-  });
-  const publishApprovalTool = createTool({
-    id: "publishApproval",
-    description: "Approve the proposal and publish the action. Only succeeds if state epoch matches and transition and policy checks pass.",
-    inputSchema: z.object({
-      reason: z.string().describe("Brief reason for approval"),
-    }),
-    outputSchema: z.object({
-      ok: z.boolean(),
-      error: z.string().optional(),
-    }),
-    execute: async (input) => {
-      if (decided) return { ok: false, error: "already_decided" };
-      const reason = (input as { reason?: string })?.reason ?? "policy_passed";
-      const state = await loadState(SCOPE_ID);
-      if (!state || state.epoch !== expectedEpoch) {
-        return { ok: false, error: "state_epoch_mismatch" };
-      }
-      const drift = (await loadDrift(env.s3, env.bucket)) ?? DRIFT_NONE;
-      const govPath = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
-      const governance = getGovernanceForScope(SCOPE_ID, loadPolicies(govPath));
-      if (from === undefined || to === undefined) {
-        return { ok: false, error: "missing_from_or_to" };
-      }
-      const decision = canTransition(from, to, drift, governance);
-      if (!decision.allowed) {
-        return { ok: false, error: decision.reason };
-      }
-      const policyResult = await checkPermission(proposal.agent, "writer", proposal.target_node);
-      if (!policyResult.allowed) {
-        recordPolicyViolation();
-        return { ok: false, error: policyResult.error ?? "policy_denied" };
-      }
-      decided = true;
-      recordProposal(proposal.proposed_action, "approved");
-      const action: Action = {
-        proposal_id: proposal.proposal_id,
-        approved_by: AGENT_ID,
-        result: "approved",
-        reason,
-        action_type: "advance_state",
-        payload: { expectedEpoch, runId: state.runId, from, to, scope_id: SCOPE_ID },
-      };
-      await env.getPublishAction()("swarm.actions.advance_state", action as unknown as Record<string, unknown>);
-      await appendEvent({
-        type: "proposal_approved",
-        proposal_id: proposal.proposal_id,
-        reason,
-        governance_path: "processProposalWithAgent",
-      });
-      logger.info("proposal approved (agent)", { proposal_id: proposal.proposal_id, reason });
-      return { ok: true };
-    },
-  });
-  const publishRejectionTool = createTool({
-    id: "publishRejection",
-    description: "Reject the proposal and publish the rejection with a reason.",
-    inputSchema: z.object({
-      reason: z.string().describe("Reason for rejection"),
-    }),
-    outputSchema: z.object({
-      ok: z.boolean(),
-    }),
-    execute: async (input) => {
-      if (decided) return { ok: true };
-      const reason = (input as { reason?: string })?.reason ?? "rejected";
-      decided = true;
-      recordProposal(proposal.proposed_action, "rejected");
-      await env.getPublishRejection()(`swarm.rejections.${proposal.proposed_action}`, {
-        proposal_id: proposal.proposal_id,
-        reason,
-        result: "rejected",
-      });
-      await appendEvent({
-        type: "proposal_rejected",
-        proposal_id: proposal.proposal_id,
-        reason,
-        governance_path: "processProposalWithAgent",
-      });
-      logger.info("proposal rejected (agent)", { proposal_id: proposal.proposal_id, reason });
-      return { ok: true };
-    },
-  });
-  return {
-    readState: readStateTool,
-    readDrift: readDriftTool,
-    readGovernanceRules,
-    checkTransition: checkTransitionTool,
-    checkPolicy: checkPolicyTool,
-    publishApproval: publishApprovalTool,
-    publishRejection: publishRejectionTool,
-    isDecided: () => decided,
-  };
-}
-
 /**
  * Process one proposal using an LLM-backed agent: tools enforce rules; the agent provides reasoning and calls publishApproval or publishRejection.
  * If the agent does not call either tool (e.g. maxSteps reached), we fall back to deterministic processProposal so the proposal is always decided.
@@ -424,77 +245,12 @@ export async function processProposalWithAgent(
   }
 }
 
-/**
- * Evaluate a proposal with the same logic as processProposal but without publishing.
- * Returns the outcome and reason (and actionPayload when approve/pending) for use by oversight or commit.
- */
+/** Evaluate proposal deterministically (delegates to governanceEvaluator). */
 export async function evaluateProposalDeterministic(
   proposal: Proposal,
   env: GovernanceAgentEnv,
 ): Promise<DeterministicResult> {
-  const { agent, proposed_action, target_node, payload, mode } = proposal;
-  if (proposed_action !== "advance_state") {
-    return { outcome: "ignore", reason: "non advance_state proposal" };
-  }
-
-  const { expectedEpoch, from, to } = payload as { expectedEpoch: number; from: string; to: string };
-  const state = await loadState(SCOPE_ID);
-  if (!state || state.epoch !== expectedEpoch) {
-    return { outcome: "reject", reason: "state_epoch_mismatch" };
-  }
-
-  const drift = (await loadDrift(env.s3, env.bucket)) ?? DRIFT_NONE;
-  const govPath = process.env.GOVERNANCE_PATH ?? join(process.cwd(), "governance.yaml");
-  const governance = getGovernanceForScope(SCOPE_ID, loadPolicies(govPath));
-
-  if (mode === "MASTER") {
-    return {
-      outcome: "approve",
-      reason: "master_override",
-      actionPayload: { expectedEpoch, runId: state.runId, from, to },
-    };
-  }
-
-  const decision = canTransition(from, to, drift, governance);
-  if (!decision.allowed) {
-    return {
-      outcome: "pending",
-      reason: decision.reason,
-      actionPayload: {
-        expectedEpoch,
-        runId: state.runId,
-        from,
-        to,
-        type: "governance_review",
-        drift_level: drift.level,
-        drift_types: drift.types,
-        block_reason: decision.reason,
-      },
-    };
-  }
-
-  const policyResult = await checkPermission(agent, "writer", target_node);
-  if (!policyResult.allowed) {
-    return {
-      outcome: "reject",
-      reason: policyResult.error ?? "policy_denied",
-      actionPayload: { expectedEpoch, runId: state.runId, from, to },
-    };
-  }
-
-  if (mode === "MITL") {
-    return {
-      outcome: "pending",
-      reason: "mitl_required",
-      actionPayload: { expectedEpoch, runId: state.runId, from, to },
-    };
-  }
-
-  return {
-    outcome: "approve",
-    reason: "policy_passed",
-    actionPayload: { expectedEpoch, runId: state.runId, from, to },
-  };
+  return evaluateProposalDeterministicImpl(proposal, env);
 }
 
 /**
