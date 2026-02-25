@@ -485,8 +485,17 @@ async function getEvidenceCoverageForScope(
 }
 
 /**
- * Insert a single goal node for a user resolution so finality's goals_completion_ratio can increase.
- * Content uses summary or a truncated decision; status is "resolved", created_by "resolution".
+ * Process a user resolution: one submission may contain multiple resolutions
+ * (e.g. "ARR confirmed at 38M. Retention package secured for CTO.").
+ *
+ * Strategy:
+ * 1. Split the decision into sentences/clauses
+ * 2. For each active goal, check if ANY sentence matches (Jaccard on tokens)
+ * 3. Also check the full text against each goal (catches compound sentences)
+ * 4. Mark all matched goals as resolved
+ * 5. If nothing matched, create a new resolved goal as fallback
+ *
+ * Returns the first resolved node_id (for backward compat).
  */
 export async function appendResolutionGoal(
   scopeId: string,
@@ -494,6 +503,43 @@ export async function appendResolutionGoal(
   summary: string,
   client?: pg.PoolClient,
 ): Promise<string> {
+  const q: Queryable = client ?? getPool();
+  const MATCH_THRESHOLD = 0.12;
+
+  const activeGoals = await q.query(
+    `SELECT node_id, content FROM nodes
+     WHERE scope_id = $1 AND type = 'goal' AND status = 'active'
+     AND superseded_at IS NULL AND (valid_to IS NULL OR valid_to > now())`,
+    [scopeId],
+  );
+
+  const sentences = splitIntoSentences(decision);
+  const fullTokens = tokenize(decision);
+  const expandedTokens = expandSynonyms(fullTokens);
+  const sentenceTokenSets = sentences.map(s => expandSynonyms(tokenize(s)));
+  const matched: string[] = [];
+
+  for (const row of activeGoals.rows) {
+    const goal = row as { node_id: string; content: string };
+    const goalTokens = expandSynonyms(tokenize(goal.content));
+
+    const score = bestMatchScore(expandedTokens, sentenceTokenSets, goalTokens);
+
+    if (score >= MATCH_THRESHOLD) {
+      await q.query(
+        `UPDATE nodes SET status = 'resolved', updated_at = now(), version = version + 1,
+         source_ref = source_ref || $2::jsonb
+         WHERE node_id = $1`,
+        [goal.node_id, JSON.stringify({ resolved_by: "resolution", decision_preview: decision.trim().slice(0, 200) })],
+      );
+      matched.push(goal.node_id);
+    }
+  }
+
+  if (matched.length > 0) {
+    return matched[0];
+  }
+
   const content = summary.trim() || decision.trim().slice(0, 500);
   return appendNode(
     {
@@ -508,6 +554,98 @@ export async function appendResolutionGoal(
     },
     client,
   );
+}
+
+const SYNONYMS: Record<string, string[]> = {
+  ip: ["patents", "patent", "intellectual", "property"],
+  patents: ["ip", "patent", "intellectual"],
+  patent: ["ip", "patents", "intellectual"],
+  cto: ["technical", "team", "chief", "officer"],
+  technical: ["cto", "tech", "engineering"],
+  retention: ["retain", "retaining", "departure", "departing"],
+  arr: ["revenue", "recurring", "annual"],
+  revenue: ["arr", "recurring", "financial"],
+  compliance: ["regulatory", "regulation", "posture"],
+  regulatory: ["compliance", "regulation"],
+  ownership: ["own", "co-ownership", "ip"],
+  valuation: ["value", "pricing", "worth"],
+  due: ["diligence"],
+  diligence: ["due"],
+};
+
+function expandSynonyms(tokens: Set<string>): Set<string> {
+  const expanded = new Set(tokens);
+  for (const t of tokens) {
+    const syns = SYNONYMS[t];
+    if (syns) for (const s of syns) expanded.add(s);
+  }
+  return expanded;
+}
+
+/**
+ * Combined match score: max of Jaccard and coverage (fraction of goal tokens found in resolution).
+ * Checks both the full text and individual sentences.
+ */
+function bestMatchScore(
+  fullTokens: Set<string>,
+  sentenceTokenSets: Set<string>[],
+  goalTokens: Set<string>,
+): number {
+  const coverage = (src: Set<string>, goal: Set<string>) => {
+    if (goal.size === 0) return 0;
+    let hit = 0;
+    for (const w of goal) if (src.has(w)) hit++;
+    return hit / goal.size;
+  };
+
+  const fullJaccard = jaccardSimilarity(fullTokens, goalTokens);
+  const fullCoverage = coverage(fullTokens, goalTokens);
+  let best = Math.max(fullJaccard, fullCoverage);
+
+  for (const st of sentenceTokenSets) {
+    const j = jaccardSimilarity(st, goalTokens);
+    const c = coverage(st, goalTokens);
+    const s = Math.max(j, c);
+    if (s > best) best = s;
+  }
+  return best;
+}
+
+function splitIntoSentences(text: string): string[] {
+  return text
+    .split(/[.!?;,]+|\n+/)
+    .map(s => s.trim())
+    .filter(s => s.length > 5);
+}
+
+const STOP_WORDS = new Set([
+  "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+  "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+  "has", "have", "had", "do", "does", "did", "will", "would", "could",
+  "should", "may", "might", "shall", "can", "this", "that", "these",
+  "those", "it", "its", "not", "no", "all", "any", "each", "every",
+  "both", "few", "more", "most", "other", "some", "such", "than",
+  "too", "very", "just", "about", "above", "after", "before", "between",
+  "into", "through", "during", "until", "against", "among", "out", "up",
+]);
+
+function tokenize(text: string): Set<string> {
+  return new Set(
+    text.toLowerCase()
+      .replace(/[^a-z0-9àâäéèêëïîôùûüÿçæœ€%]+/gi, " ")
+      .split(/\s+/)
+      .filter(w => w.length > 2 && !STOP_WORDS.has(w))
+  );
+}
+
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 0;
+  let intersection = 0;
+  for (const w of a) {
+    if (b.has(w)) intersection++;
+  }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
 }
 
 /** Update a node's confidence (monotonic upsert: only if new confidence >= existing). */
