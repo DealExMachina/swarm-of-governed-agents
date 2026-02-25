@@ -402,6 +402,13 @@ export async function evaluateFinality(scopeId: string): Promise<FinalityResult 
     // convergence_history table may not exist yet; proceed without convergence data
   }
 
+  // Gate E: minimum content — do not auto-resolve or trigger HITL when there's no meaningful content.
+  // When all dimensions are 1.0 only because there are zero claims/goals/risks, the score is vacuously high.
+  const hasContent = snapshot.claims_active_count > 0 || snapshot.goals_completion_ratio < 1;
+  if (!hasContent) {
+    return { kind: "status", status: "ACTIVE" };
+  }
+
   // Path A: RESOLVED if all hard conditions hold and goal score >= auto
   // Monotonicity gate (Aegean): require stable non-decreasing score for β rounds
   // Gate C: trajectory quality >= 0.7 (no oscillation / spike-drop)

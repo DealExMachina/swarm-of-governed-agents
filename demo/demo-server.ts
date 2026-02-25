@@ -1201,8 +1201,27 @@ const DEMO_HTML = /* html */ `<!DOCTYPE html>
       var sec = Math.floor((Date.now() - stepStartTime) / 1000);
       var epoch = (lastSummary && lastSummary.state) ? lastSummary.state.epoch : 0;
       document.getElementById('statusText').textContent = 'Agents working... epoch ' + epoch + ' (' + sec + 's)';
+
+      if (sec > 20 && !state.hitlTriggered) {
+        try {
+          var pr = await fetch('/api/pending');
+          if (pr.ok) {
+            var pd = await pr.json();
+            var items = (pd.pending || []).filter(function(p) {
+              var pl = (p.proposal || {}).payload || {};
+              return pl.type === 'finality_review';
+            });
+            if (items.length > 0) {
+              state.hitlTriggered = true;
+              addActivity('Watchdog: finality review pending', 'hitl');
+              loadSituationAndShow();
+            }
+          }
+        } catch(_) {}
+      }
     }, 3000);
 
+    var state = { hitlTriggered: false };
     startStepTimeout();
   };
 

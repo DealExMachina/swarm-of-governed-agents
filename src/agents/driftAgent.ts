@@ -13,10 +13,15 @@ const DRIFT_LLM_TIMEOUT_MS = 90_000;
 const KEY_DRIFT = "drift/latest.json";
 const KEY_DRIFT_HIST = (ts: string) => `drift/history/${ts.replace(/[:.]/g, "-")}.json`;
 
-const DRIFT_INSTRUCTIONS = `You are a drift analysis agent. Compare current facts against historical facts.
-Identify contradictions, goal shifts, confidence degradation, and emerging risks.
-Classify drift level (none, low, medium, high) and types (factual, goal, contradiction, entropy).
-Provide brief reasoning for each finding. When explaining a drift or discrepancy, always cite sources and references: which document or fact supports the finding, and a short excerpt or quote where relevant. Use the writeDrift tool with notes/reasoning and a references array (each item: type, optional doc, optional excerpt). Use the tools: readFacts, readFactsHistory, readCurrentDrift, then writeDrift with your analysis.`;
+const DRIFT_INSTRUCTIONS = `You are a drift analysis agent. Your job is to detect ALL forms of drift and contradiction.
+
+Step 1 — Temporal drift: Compare current facts against historical facts. If history exists and differs, identify what changed: factual contradictions, goal shifts, confidence degradation, emerging risks.
+
+Step 2 — Intra-batch drift: Even if there is no history or history matches current, analyze the current facts for INTERNAL inconsistencies. Look for claims that contradict each other (e.g. one claim says ARR is 50M while another says 38M), goals that conflict with identified risks, or facts from different sources that disagree. This is critical when multiple documents are ingested at once.
+
+Step 3 — Classify: drift level (none, low, medium, high) and types (factual, goal, contradiction, entropy). If you find ANY contradictions within the facts — even without history — drift level should be at least "medium". Provide brief reasoning and cite sources with references (type, doc, excerpt).
+
+Use tools: readFacts, readFactsHistory, readCurrentDrift, then writeDrift with your analysis.`;
 
 const driftRefSchema = z.object({
   type: z.string(),
@@ -115,11 +120,124 @@ export async function runDriftAgent(
     }
   }
 
+  const factsRaw = await s3GetText(s3, bucket, "facts/latest.json");
+  const facts = factsRaw ? (JSON.parse(factsRaw) as Record<string, unknown>) : null;
+
+  const intraBatch = detectIntraBatchDrift(facts);
+
   const driftRaw = await s3GetText(s3, bucket, KEY_DRIFT);
-  const drift = driftRaw
+  const existing = driftRaw
     ? (JSON.parse(driftRaw) as { level: string; types: string[]; notes?: string[] })
-    : { level: "none", types: [] as string[], notes: ["no drift yet"] };
+    : null;
+
+  const drift = intraBatch.hasContradictions
+    ? {
+        level: intraBatch.level,
+        types: intraBatch.types,
+        notes: intraBatch.notes,
+        references: intraBatch.references,
+      }
+    : existing ?? { level: "none", types: [] as string[], notes: ["no drift yet"] };
+
   const ts = new Date().toISOString();
+  await s3PutJson(s3, bucket, KEY_DRIFT, drift);
   await s3PutJson(s3, bucket, KEY_DRIFT_HIST(ts), drift);
-  return { wrote: [KEY_DRIFT_HIST(ts)], level: drift.level, types: drift.types };
+  return { wrote: [KEY_DRIFT, KEY_DRIFT_HIST(ts)], level: drift.level, types: drift.types };
+}
+
+/**
+ * Detect contradictions within a single fact set (intra-batch drift).
+ * Used when all documents are ingested at once and there's no prior baseline.
+ */
+function detectIntraBatchDrift(facts: Record<string, unknown> | null): {
+  hasContradictions: boolean;
+  level: string;
+  types: string[];
+  notes: string[];
+  references: Array<{ type: string; doc?: string; excerpt?: string }>;
+} {
+  if (!facts) return { hasContradictions: false, level: "none", types: [], notes: [], references: [] };
+
+  const claims = Array.isArray(facts.claims) ? facts.claims.filter((c): c is string => typeof c === "string") : [];
+  const contradictions = Array.isArray(facts.contradictions) ? facts.contradictions.filter((c): c is string => typeof c === "string") : [];
+  const risks = Array.isArray(facts.risks) ? facts.risks.filter((r): r is string => typeof r === "string") : [];
+  const goals = Array.isArray(facts.goals) ? facts.goals.filter((g): g is string => typeof g === "string") : [];
+
+  const notes: string[] = [];
+  const references: Array<{ type: string; doc?: string; excerpt?: string }> = [];
+  const types = new Set<string>();
+
+  if (contradictions.length > 0) {
+    types.add("contradiction");
+    notes.push(`${contradictions.length} contradiction(s) detected within the current facts`);
+    for (const c of contradictions) {
+      references.push({ type: "contradiction", excerpt: c.slice(0, 200) });
+    }
+  }
+
+  const numericClaims = claims.filter(c => /\d/.test(c));
+  for (let i = 0; i < numericClaims.length; i++) {
+    for (let j = i + 1; j < numericClaims.length; j++) {
+      const shared = findSharedEntity(numericClaims[i], numericClaims[j]);
+      if (shared) {
+        const nums1 = extractNumbers(numericClaims[i]);
+        const nums2 = extractNumbers(numericClaims[j]);
+        for (const n1 of nums1) {
+          for (const n2 of nums2) {
+            if (n1 !== n2 && Math.abs(n1 - n2) / Math.max(n1, n2) > 0.1) {
+              types.add("factual");
+              const note = `Numeric discrepancy for "${shared}": ${n1} vs ${n2}`;
+              if (!notes.includes(note)) {
+                notes.push(note);
+                references.push({ type: "factual", excerpt: `"${numericClaims[i].slice(0, 80)}" vs "${numericClaims[j].slice(0, 80)}"` });
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (risks.length >= 3) {
+    types.add("entropy");
+    notes.push(`High risk density: ${risks.length} risks identified across the fact set`);
+  }
+
+  if (goals.length > 0 && risks.length > 0) {
+    types.add("goal");
+    notes.push(`${goals.length} goal(s) coexist with ${risks.length} risk(s) that may impede them`);
+  }
+
+  const hasContradictions = notes.length > 0;
+  const typesArr = [...types];
+  const level = contradictions.length > 0 || typesArr.length >= 3
+    ? "high"
+    : typesArr.length >= 2
+      ? "medium"
+      : hasContradictions
+        ? "low"
+        : "none";
+
+  if (hasContradictions) {
+    notes.unshift("automatic structured drift detection");
+  }
+
+  return { hasContradictions, level, types: typesArr, notes, references };
+}
+
+function findSharedEntity(a: string, b: string): string | null {
+  const wordsA = a.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+  const wordsB = new Set(b.toLowerCase().split(/\s+/).filter(w => w.length > 3));
+  const stopWords = new Set(["that", "this", "with", "from", "have", "been", "were", "will", "about", "into", "than", "also", "their", "which"]);
+  for (const w of wordsA) {
+    if (wordsB.has(w) && !stopWords.has(w)) return w;
+  }
+  return null;
+}
+
+function extractNumbers(s: string): number[] {
+  const matches = s.match(/[\d,.]+/g) ?? [];
+  return matches
+    .map(m => parseFloat(m.replace(/,/g, "")))
+    .filter(n => Number.isFinite(n) && n > 0);
 }
