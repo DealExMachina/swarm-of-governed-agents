@@ -59,6 +59,10 @@ export interface AgentLoopOptions {
   scopeId?: string;
   /** Abort signal for graceful shutdown — loop exits when aborted. */
   signal?: AbortSignal;
+  /** Override NATS consumer name for competing consumers (hatchery mode). */
+  consumerName?: string;
+  /** Called after every bus.consume batch to prove liveness (hatchery heartbeat). */
+  onHeartbeat?: (processed: number) => void;
 }
 
 /**
@@ -81,7 +85,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const r = runner;
 
   const subject = "swarm.events.>";
-  const consumer = `${role}-${agentId}-events`;
+  const consumer = opts.consumerName ?? `${role}-${agentId}-events`;
 
   await bus.ensureStream(stream, [subject]);
 
@@ -190,6 +194,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       handleMessage,
       { timeoutMs: 5000, maxMessages: 10 },
     );
+    opts.onHeartbeat?.(processed);
     if (processed === 0) {
       await new Promise((r) => setTimeout(r, delayMs));
       delayMs = Math.min(delayMs * 2, BACKOFF_MAX_MS);

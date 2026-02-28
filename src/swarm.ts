@@ -14,6 +14,8 @@ import { runActionExecutor } from "./actionExecutor.js";
 import { runAgentLoop } from "./agentLoop.js";
 import { runTunerAgentLoop } from "./agents/tunerAgent.js";
 import { createSwarmEvent } from "./events.js";
+import { loadHatcheryConfig } from "./hatcheryConfig.js";
+import { AgentHatchery } from "./hatchery.js";
 
 const BUCKET = process.env.S3_BUCKET!;
 const AGENT_ID = process.env.AGENT_ID ?? `agent-${Math.random().toString(16).slice(2, 10)}`;
@@ -93,6 +95,27 @@ async function main(): Promise<void> {
 
   if (process.env.BOOTSTRAP === "1") {
     await bootstrap(bus);
+  }
+
+  // ── Hatchery mode: single-process orchestrator ─────────────────────────────
+  if (ROLE === "hatchery") {
+    const config = loadHatcheryConfig();
+    const hatchery = new AgentHatchery(config, bus, s3, BUCKET);
+
+    const hatcheryShutdown = async (sig: string) => {
+      logger.info("hatchery shutdown signal received", { signal: sig });
+      await hatchery.shutdown();
+      try { await drainPool(); } catch {}
+      process.exit(0);
+    };
+    process.removeAllListeners("SIGTERM");
+    process.removeAllListeners("SIGINT");
+    process.on("SIGTERM", () => void hatcheryShutdown("SIGTERM"));
+    process.on("SIGINT", () => void hatcheryShutdown("SIGINT"));
+
+    await hatchery.start();
+    await new Promise<void>(() => {}); // block forever; shutdown via signal
+    return;
   }
 
   if (ROLE === "governance") {

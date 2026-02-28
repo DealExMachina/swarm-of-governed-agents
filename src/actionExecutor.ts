@@ -256,12 +256,24 @@ async function executeActionInline(
   }
 }
 
-export async function runActionExecutor(bus: EventBus, signal?: AbortSignal): Promise<void> {
+export interface ExecutorLoopOpts {
+  signal?: AbortSignal;
+  consumerName?: string;
+  agentId?: string;
+  onHeartbeat?: (processed: number) => void;
+}
+
+export async function runActionExecutor(bus: EventBus, signalOrOpts?: AbortSignal | ExecutorLoopOpts): Promise<void> {
+  const opts: ExecutorLoopOpts = signalOrOpts instanceof AbortSignal
+    ? { signal: signalOrOpts }
+    : (signalOrOpts ?? {});
+  const signal = opts.signal;
+  const effectiveAgentId = opts.agentId ?? AGENT_ID;
   const s3 = makeS3();
   const subject = "swarm.actions.>";
-  const consumer = `executor-${AGENT_ID}`;
+  const consumer = opts.consumerName ?? `executor-${effectiveAgentId}`;
 
-  logger.info("action executor started", { subject, consumer });
+  logger.info("action executor started", { subject, consumer, agentId: effectiveAgentId });
 
   while (!signal?.aborted) {
     const processed = await bus.consume(
@@ -295,6 +307,7 @@ export async function runActionExecutor(bus: EventBus, signal?: AbortSignal): Pr
       },
       { timeoutMs: 5000, maxMessages: 10 },
     );
+    opts.onHeartbeat?.(processed);
     if (processed === 0) {
       await new Promise((r) => setTimeout(r, 500));
     }

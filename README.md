@@ -1,8 +1,8 @@
 # Swarm of Governed Agents
 
-> Can we replace orchestration-as-topology with governance-as-policy for agent coordination — with formal convergence guarantees?
+> Can we replace orchestration-as-topology with governance-as-policy for agent coordination -- with formal convergence guarantees, bitemporal auditability, and a perpetual compliance lifecycle?
 
-Governed agent swarm: event-driven reasoning roles sharing a context, governed by policy, converging toward finality.
+Governed agent swarm: event-driven reasoning roles sharing a bitemporal context graph, governed by pluggable policy engines (YAML + OPA-WASM), converging toward certified finality checkpoints -- indefinitely, as new evidence and regulations arrive.
 
 ---
 
@@ -12,7 +12,7 @@ Most agent frameworks coordinate via DAGs: fixed pipelines where topology determ
 
 This project tests an alternative hypothesis: **declarative governance over shared state, combined with a semantic graph and formal convergence tracking, can produce auditable, converging agent coordination without fixed pipelines.**
 
-Concretely: four agents (facts, drift, planner, status) operate independently on shared context (Postgres WAL + S3). A governance agent enforces declarative transition rules and authorization policy (OpenFGA). A finality evaluator tracks convergence via a Lyapunov disagreement function and triggers human-in-the-loop review when the system plateaus. No agent knows about any other agent's existence. Coordination emerges from the shared state and the governance layer.
+Concretely: seven agents (facts, drift, planner, status, governance, executor, tuner) operate independently on shared bitemporal context (Postgres WAL + semantic graph + S3). A three-tier governance pipeline -- deterministic rules, oversight agent, full LLM -- enforces declarative transition rules and authorization policy (OpenFGA), with circuit-breaker fallback ensuring governance never stalls. A finality evaluator tracks convergence via a Lyapunov disagreement function with five formal gates, triggers human-in-the-loop review when the system plateaus, and issues Ed25519-signed finality certificates when convergence is achieved. No agent knows about any other agent's existence. Coordination emerges from the shared state and the governance layer. Finality is not terminal: new documents, regulatory changes, or periodic reviews re-open convergence, producing a chain of certified checkpoints over an indefinite lifecycle.
 
 The formal guarantee: if the Lyapunov function V(t) decreases monotonically across evaluation cycles, the system is asymptotically converging toward finality. If V increases, the system detects divergence and escalates. If V stalls, it detects plateau and routes to human review. See [docs/convergence.md](docs/convergence.md) for the full theory.
 
@@ -28,6 +28,9 @@ The formal guarantee: if the Lyapunov function V(t) decreases monotonically acro
 | **No audit trail** | Decisions scattered in code, no record of *why* | Every transition logged to append-only WAL with proposer, approver, rationale, governance path |
 | **Unbounded lifecycles** | "Run until done" — but what is done? | Four terminal states: RESOLVED, ESCALATED, BLOCKED, EXPIRED — each with defined semantics |
 | **Contradictions absorbed silently** | New data overwrites old | CRDT-inspired upserts; contradictions are first-class graph edges; governance blocks on drift |
+| **One-shot analysis** | Pipeline runs once, declares done; no mechanism for ongoing monitoring | Perpetual lifecycle: finality is a certified checkpoint, not an endpoint; new context re-opens convergence over the same graph |
+| **No temporal auditability** | State is current-only; cannot reconstruct what was known at a past date | Bitemporal graph: valid time (when true in the world) + transaction time (when recorded); as-of queries on either or both axes |
+| **LLM dependency for governance** | System halts if LLM is unavailable | Three-tier governance with circuit breaker: falls back to deterministic rules (zero LLM tokens) on failure |
 
 ---
 
@@ -49,9 +52,13 @@ The architecture rests on three principles:
 
 **1. Shared, append-only context.** Every agent reads from the same event log (Postgres WAL) and the same facts/drift state (S3). There is no "agent A's context" vs "agent B's context." There is context. Agents read it, reason over it, propose changes, and wait for approval.
 
-**2. Proposals and approvals.** No agent directly advances the state. A facts agent proposes `FactsExtracted`; the governance agent checks whether that transition is currently allowed (given drift level, policy, epoch); the executor performs it if approved. This produces an audit trail: every transition has a reason, a proposer, and an approver.
+**2. Proposals and approvals via three-tier governance.** No agent directly advances the state. A facts agent proposes `FactsExtracted`; the governance pipeline evaluates it:
+- **Tier 1 (deterministic):** Policy engine (YAML or OPA-WASM) checks transition rules + drift conditions; OpenFGA checks permissions. Zero LLM tokens. Always available.
+- **Tier 2 (oversight):** A lightweight LLM decides whether to accept the deterministic result, escalate to full LLM reasoning, or escalate to human.
+- **Tier 3 (full LLM):** A governance agent reasons over state, drift, and rules using tool calls, then publishes approval or rejection with rationale.
+A circuit breaker (3 failures, 60s cooldown) ensures Tier 1 fallback on LLM degradation. Every decision records which tier produced it.
 
-**3. Declarative rules, not imperative code.** `governance.yaml` expresses transition rules and remediation actions. Rules are evaluated at runtime, not compiled into graph edges. Adding a new constraint is a YAML change, not a refactor.
+**3. Declarative rules, not imperative code.** A pluggable `PolicyEngine` interface supports YAML rules (default) and OPA-WASM (compiled Rego policies). XACML combining algorithms (deny-overrides, first-applicable) resolve multi-policy conflicts. Every evaluation produces an immutable `DecisionRecord` with a policy-version hash, binding each decision to the exact rule set that produced it. Adding a new constraint is a YAML change, not a refactor.
 
 ```mermaid
 stateDiagram-v2
@@ -90,11 +97,49 @@ See [docs/convergence.md](docs/convergence.md) for the formal theory, configurat
 
 ---
 
-## The semantic graph
+## Perpetual finality: from checkpoint to checkpoint
 
-The **semantic graph** — Postgres with pgvector — makes the knowledge structure explicit. Claims, goals, risks, and assumptions are addressable nodes. Contradictions, resolutions, and supports are typed edges. The graph is updated after each extraction cycle via monotonic upserts; it persists across cycles.
+Most regulated processes are not one-shot. KYC reviews recur annually. IFRS 9 models are recalibrated quarterly. Post-merger integration monitoring runs for years. Sanctions lists update daily. The system that analyzed yesterday's data must analyze tomorrow's -- over the same knowledge base, with the same audit trail.
 
-The finality evaluator queries the graph to compute a goal score across four weighted dimensions: claim confidence (0.30), contradiction resolution (0.30), goal completion (0.25), and risk score (0.15). When the system is near finality but not quite, it routes to **human-in-the-loop review** with structured context — not a bare confidence number but convergence rate, ETA, bottleneck dimension, and score trajectory.
+This architecture treats finality as a **certified checkpoint**, not a terminal state:
+
+1. When a scope reaches RESOLVED, a signed JWS certificate is issued (Ed25519) recording the decision, the dimensional scores, the policy version hashes, and the timestamp.
+2. The semantic graph is **not frozen**. It remains the live, authoritative knowledge representation.
+3. When new context arrives -- a new document, a regulatory amendment, a scheduled periodic review -- the scope re-enters ACTIVE.
+4. The new convergence cycle starts from the **existing graph state**. All prior claims, contradictions, resolutions, and confidence scores are preserved. New facts layer on top.
+5. The Lyapunov function V(t) is recomputed. If new contradictions have increased disagreement, V rises and convergence must recur. If the new information confirms prior conclusions, V stays low and finality is reached quickly.
+6. A **new finality certificate** is issued, creating a chain: each certifies the scope's state at a specific time, under a specific policy version.
+
+The bitemporal graph is what makes this work without information loss. Old facts are superseded, not deleted. An auditor can reconstruct the graph as it existed at any prior finality point and compare it to the current state.
+
+| Regulated domain | Trigger for re-convergence | Certificate chain meaning |
+|---|---|---|
+| KYC/AML | Annual review, adverse media, sanctions list update | Each certificate = one due diligence cycle |
+| IFRS 9 (ECL) | Quarterly macro recalibration | Each certificate = one impairment assessment |
+| Post-merger integration | Quarterly operational reports | Each certificate = one integration health check |
+| Pharmacovigilance | Adverse event reports | Each certificate = one safety reassessment |
+| Sanctions screening | Daily list update | Each certificate = one screening pass |
+
+No separate "monitoring system" is needed. The same architecture that performs initial analysis performs ongoing surveillance.
+
+---
+
+## The bitemporal semantic graph
+
+The **semantic graph** -- Postgres with pgvector -- makes the knowledge structure explicit. Claims, goals, risks, and assumptions are addressable nodes. Contradictions, resolutions, and supports are typed edges. The graph is updated after each extraction cycle via monotonic upserts; it persists across cycles -- and across finality boundaries.
+
+**Dual temporality.** Every node and edge carries two independent time axes:
+- **Valid time** (`valid_from`, `valid_to`): when the fact holds in the real world. A revenue figure may be valid for fiscal year 2024; a compliance certificate valid until its expiry date.
+- **Transaction time** (`recorded_at`, `superseded_at`): when the system learned or corrected the fact. Superseded nodes are never deleted; they receive a `superseded_at` timestamp while their replacement gets a new `recorded_at`.
+
+This enables three classes of audit query:
+- **As-of valid time:** "What was believed true on reporting date T?"
+- **As-of transaction time:** "What did the system know at audit date T'?"
+- **Combined:** "What did the system know at T' about facts valid at T?"
+
+Contradiction detection respects valid-time overlap: two claims contradict only if their validity windows intersect. A revenue figure valid in Q1 does not contradict a revised figure valid from Q2 onward. An **evidence schema** declares required evidence types and maximum staleness per domain, blocking finality when evidence is missing or has expired.
+
+The finality evaluator queries the graph to compute a goal score across four weighted dimensions: claim confidence (0.30), contradiction resolution (0.30), goal completion (0.25), and risk score (0.15). When the system is near finality but not quite, it routes to **human-in-the-loop review** with structured context -- not a bare confidence number but convergence rate, ETA, bottleneck dimension, and score trajectory.
 
 ---
 
@@ -171,15 +216,15 @@ See [docs/validation.md](docs/validation.md) for the complete test methodology a
 
 **Context and state:** Postgres `context_events` (append-only WAL) and `swarm_state` (singleton, epoch CAS). S3 for facts, drift, and history.
 
-**Semantic graph:** Postgres `nodes` and `edges` (optionally bitemporal: valid_from, valid_to, recorded_at, superseded_at per migration 011). Synced from facts via monotonic upserts; time-travel queries and append-over-update (supersede) supported.
+**Semantic graph:** Postgres `nodes` and `edges` with bitemporal columns (`valid_from`, `valid_to`, `recorded_at`, `superseded_at` per migration 011). Synced from facts via monotonic CRDT upserts. Time-travel queries on valid time, transaction time, or both. Append-over-update via supersede (never delete). Evidence schemas define required types and staleness constraints per domain.
 
-**Convergence history:** Postgres `convergence_history` (scope_id, epoch, goal_score, lyapunov_v, dimension_scores JSONB, pressure JSONB). Append-only.
+**Convergence history:** Postgres `convergence_history` (scope_id, epoch, goal_score, lyapunov_v, dimension_scores JSONB, pressure JSONB). Append-only. Feeds Gate C oscillation detection (lag-1 autocorrelation) and trajectory quality scoring.
 
-**Governance loop:** Planner proposes -> policy engine (YAML or OPA-WASM) evaluates rules -> OpenFGA checks -> executor performs approved advance. Every decision persisted to `decision_records` with policy version; obligations executed via enforcer.
+**Three-tier governance:** Tier 1 deterministic (policy engine + OpenFGA, zero LLM tokens) -> Tier 2 oversight agent (accept/escalate-to-LLM/escalate-to-human) -> Tier 3 full LLM governance agent with tool calls. Circuit breaker (3 failures, 60s cooldown) ensures Tier 1 fallback. Every decision persisted to `decision_records` with policy version hash and governance path; obligations executed via enforcer.
 
-**Finality certificates:** When a scope reaches RESOLVED, a signed JWS (Ed25519) is stored in `finality_certificates`. Summary API and `GET /finality-certificate/:scope_id` (MITL server) expose policy version and certificate for audit.
+**Finality certificates:** When a scope reaches RESOLVED (all five gates passed) or is human-approved, a signed JWS (Ed25519) is stored in `finality_certificates` with policy version hashes and dimensional snapshot. Summary API and `GET /finality-certificate/:scope_id` expose certificates for audit. Perpetual lifecycle: new context re-opens convergence; new certificate extends the chain.
 
-**Finality:** After each governance round, `evaluateFinality(scopeId)` runs against the semantic graph and convergence history. Monotonicity gate + plateau detection + divergence detection.
+**Finality:** After each governance round, `evaluateFinality(scopeId)` runs against the semantic graph and convergence history. Five gates: monotonicity (A), evidence coverage + contradiction mass (B), oscillation detection + trajectory quality (C), quiescence (D), minimum content (E). Plus divergence escalation and plateau-triggered HITL.
 
 **Facts-worker:** Python (FastAPI + OpenAI SDK). Runs in Docker. OpenAI by default; Ollama opt-in via `FACTS_WORKER_OLLAMA=1`.
 
@@ -277,13 +322,13 @@ curl -s -X POST http://localhost:3002/context/docs \
 
 ## Approval modes
 
-Set in `governance.yaml`:
+Set in `governance.yaml` (per-scope overrides supported):
 
-| Mode | Behaviour |
-|------|-----------|
-| `YOLO` | Governance agent approves all valid transitions automatically. |
-| `MITL` | Every proposal goes to the MITL queue; a human approves or rejects. |
-| `MASTER` | Deterministic rule-based path; no LLM rationale. |
+| Mode | Behaviour | Governance tiers used |
+|------|-----------|----------------------|
+| `YOLO` | Valid transitions approved automatically. Oversight agent may escalate. | Tier 1 + Tier 2 + Tier 3 (with circuit-breaker fallback to Tier 1) |
+| `MITL` | Every proposal goes to the MITL queue; a human approves or rejects. | Tier 1 (deterministic) + human |
+| `MASTER` | Deterministic rule-based path; no LLM rationale. | Tier 1 only (zero LLM tokens) |
 
 ---
 
@@ -349,12 +394,13 @@ For current status, verified functionality, and next steps, see **STATUS.md**.
 
 ## Further reading
 
-- [docs/architecture.md](docs/architecture.md) — event bus internals, state machine, database schema, governance loop, policy engine, decision records, finality certificates
-- [docs/convergence.md](docs/convergence.md) — formal convergence theory, Gate C (oscillation, trajectory quality), configuration reference, benchmark scenarios
-- [docs/finality-design.md](docs/finality-design.md) — finality gates B/C/D, certificates, evidence coverage, implementation status
-- [docs/governance-design.md](docs/governance-design.md) — policy stack, OPA-WASM, obligations, combining algorithms
-- [docs/validation.md](docs/validation.md) — test methodology, what's proven vs theoretical, known gaps
-- [docs/demo.md](docs/demo.md) — Project Horizon M&A demo walkthrough and explainability
+- [publication/swarm-governed-agents.pdf](publication/swarm-governed-agents.pdf) -- full paper: formal design, convergence theory, five gates, bitemporal model, perpetual finality lifecycle, enterprise regulatory fitness
+- [docs/architecture.md](docs/architecture.md) -- event bus internals, state machine, database schema, governance loop, policy engine, decision records, finality certificates
+- [docs/convergence.md](docs/convergence.md) -- formal convergence theory, Gate C (oscillation, trajectory quality), configuration reference, benchmark scenarios
+- [docs/finality-design.md](docs/finality-design.md) -- finality gates B/C/D, certificates, evidence coverage, implementation status
+- [docs/governance-design.md](docs/governance-design.md) -- policy stack, OPA-WASM, obligations, combining algorithms
+- [docs/validation.md](docs/validation.md) -- test methodology, what's proven vs theoretical, known gaps
+- [docs/demo.md](docs/demo.md) -- Project Horizon M&A demo walkthrough and explainability
 
 ---
 
@@ -376,7 +422,16 @@ For current status, verified functionality, and next steps, see **STATUS.md**.
    — Stigmergic coordination; basis for pressure-directed agent activation.
 
 6. **Pang, R. et al.** (2019). Zanzibar: Google's Consistent, Global Authorization System. *USENIX ATC 2019*. [usenix.org](https://www.usenix.org/conference/atc19/presentation/pang)
-   — Relationship-based access control at scale; theoretical foundation for OpenFGA integration.
+   -- Relationship-based access control at scale; theoretical foundation for OpenFGA integration.
+
+7. **Snodgrass, R. T.** (2000). *Developing Time-Oriented Database Applications in SQL*. Morgan Kaufmann.
+   -- Bitemporal data model: valid time + transaction time; foundation for the dual-temporality semantic graph.
+
+8. **OASIS** (2013). *eXtensible Access Control Markup Language (XACML) Version 3.0*. [OASIS Standard](http://docs.oasis-open.org/xacml/3.0/xacml-3.0-core-spec-os-en.html)
+   -- Combining algorithms (deny-overrides, first-applicable) for multi-policy evaluation.
+
+9. **Open Policy Agent** (2021). *OPA: Policy-based control for cloud native environments*. [openpolicyagent.org](https://www.openpolicyagent.org/). CNCF Graduated Project.
+   -- Rego policy language and WASM compilation; pluggable governance backend.
 
 ---
 
@@ -386,11 +441,11 @@ If you use this project in academic research or technical writing, please cite:
 
 ```bibtex
 @software{governed_agent_swarm_2026,
-  author       = {Jean-Baptiste Dézard},
-  title        = {Swarm of Governed Agents: Declarative Governance and Formal Convergence for Multi-Agent Coordination},
+  author       = {Jean-Baptiste D\'ezard},
+  title        = {Swarm of Governed Agents: Declarative Governance, Bitemporal State, and Formal Convergence for Multi-Agent Coordination},
   year         = {2026},
   url          = {https://github.com/DealExMachina/swarm-of-governed-agents},
-  note         = {Event-driven agent swarm with Lyapunov convergence tracking, CRDT semantic graph, and declarative governance}
+  note         = {Event-driven agent swarm with Lyapunov convergence, bitemporal CRDT semantic graph, pluggable policy engines, Ed25519 finality certificates, and perpetual compliance lifecycle}
 }
 ```
 

@@ -26,6 +26,7 @@ import { getLatestFinalityDecision } from "./finalityDecisions.js";
 import { getGovernancePolicyVersion, getFinalityPolicyVersion } from "./policyVersions.js";
 import { getLatestCertificate } from "./finalityCertificates.js";
 import { requireBearer } from "./auth.js";
+import { getHatcheryInstance } from "./hatchery.js";
 
 // ── Persistent EventBus singleton ────────────────────────────────────────────
 // Reused across all requests (avoids creating/destroying NATS connections per POST).
@@ -510,6 +511,15 @@ async function main(): Promise<void> {
       if (req.method === "GET" && pathname === "/convergence") {
         if (!requireBearer(req, res)) return;
         await handleConvergence(req, res);
+        return;
+      }
+      if (req.method === "GET" && pathname === "/hatchery/snapshot") {
+        const hatchery = getHatcheryInstance();
+        if (!hatchery) {
+          sendJson(res, 404, { error: "hatchery not active (legacy mode)" });
+        } else {
+          sendJson(res, 200, hatchery.getSnapshot() as unknown as Record<string, unknown>);
+        }
         return;
       }
       if (req.method === "GET" && pathname === "/health") {

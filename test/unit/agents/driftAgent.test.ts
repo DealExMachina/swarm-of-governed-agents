@@ -37,11 +37,12 @@ describe("driftAgent", () => {
 
     const result = await runDriftAgent(s3, bucket, {});
 
-    expect(putCapture).toHaveLength(1);
-    expect(putCapture[0].key).toMatch(/^drift\/history\/.+/);
-    expect(JSON.parse(putCapture[0].body)).toEqual(drift);
+    expect(putCapture).toHaveLength(2);
+    expect(putCapture[0].key).toBe("drift/latest.json");
+    expect(putCapture[1].key).toMatch(/^drift\/history\/.+/);
+    expect(JSON.parse(putCapture[1].body)).toEqual(drift);
     expect(result).toMatchObject({ level: "medium", types: ["factual"] });
-    expect((result as any).wrote).toHaveLength(1);
+    expect((result as any).wrote).toHaveLength(2);
   });
 
   it("handles missing drift (none yet)", async () => {
@@ -51,6 +52,6 @@ describe("driftAgent", () => {
     const result = await runDriftAgent(s3, "b", {});
 
     expect(result).toMatchObject({ level: "none", types: [] });
-    expect(putCapture).toHaveLength(1);
+    expect(putCapture).toHaveLength(2);
   });
 });

@@ -106,11 +106,13 @@ export async function runTunerCycle(
 
 /**
  * Run the tuner agent loop: every ~30 min run a cycle, then publish filters_optimized event.
+ * Supports an optional AbortSignal for graceful shutdown in hatchery mode.
  */
 export async function runTunerAgentLoop(
   s3: S3Client,
   bucket: string,
   publishEvent: (type: string, payload: Record<string, unknown>) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<void> {
   logger.info("tuner agent started", { intervalMs: TUNER_INTERVAL_MS });
   const run = async () => {
@@ -118,6 +120,13 @@ export async function runTunerAgentLoop(
     await publishEvent("filters_optimized", result);
   };
   await run();
-  setInterval(run, TUNER_INTERVAL_MS);
-  await new Promise<void>(() => {});
+  return new Promise<void>((resolve) => {
+    const intervalId = setInterval(() => {
+      if (signal?.aborted) { clearInterval(intervalId); resolve(); return; }
+      run().catch(() => {});
+    }, TUNER_INTERVAL_MS);
+    if (signal) {
+      signal.addEventListener("abort", () => { clearInterval(intervalId); resolve(); }, { once: true });
+    }
+  });
 }

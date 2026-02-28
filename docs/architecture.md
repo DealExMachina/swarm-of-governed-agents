@@ -781,3 +781,72 @@ flowchart LR
   N -->|source_id, target_id| E
   N -.->|logical: snapshot from nodes/edges| CH
 ```
+
+---
+
+## 10. Agent Hatchery: Dynamic Lifecycle Management
+
+The hatchery replaces `swarm-all.sh` (6 static background processes) with a single-process orchestrator that spawns agent loops as in-process async tasks.
+
+### Design
+
+- **In-process tasks:** Each agent runs as a `Promise<void>` sharing the Postgres pool, S3 client, and NATS connection.
+- **Competing consumers:** All instances of the same role share a NATS consumer (`{role}-shared-events`), so messages are distributed, not duplicated.
+- **Erlang-style supervisor:** One-for-one restart with intensity limits (max 3 restarts per 5s window).
+
+### Scaling Algorithm (M/M/c + KEDA Hybrid)
+
+For each role the hatchery periodically computes the optimal instance count:
+
+1. **Proactive (M/M/c):** Estimate arrival rate lambda from a sliding window of NATS consumer lag samples; compute service rate mu from `filter_configs.stats.avgLatencyMs`; optimal workers `c = ceil(lambda / (mu * rho_target))`, clamped to `[min, max]`.
+2. **Reactive (KEDA):** If consumer lag exceeds `lagThreshold` and `activationLagThreshold`, override with `c = min(ceil(lag / lagThreshold) + current, max)`.
+3. **Priority (pressure-directed):** When multiple roles need scaling, use convergence pressure from the convergence tracker to scale the highest-pressure role first. Disabled via `HATCHERY_PRESSURE_SCALING=0`.
+
+### Hysteresis
+
+- Scale-up: evaluated every 5s, acted on immediately.
+- Scale-down: evaluated every 60s, with a 5-minute cooldown per role. Newest instance drained first (LIFO).
+
+### Per-Role Heartbeat Timeouts
+
+Agents have vastly different processing times (facts: up to 5 min, governance: 30s). Heartbeat timeouts are calibrated per-role to avoid false drains during long LLM calls. The `onHeartbeat` callback fires after every `bus.consume` batch to prove liveness.
+
+### Scaling Decision Flow
+
+```mermaid
+flowchart TD
+    lagSample[Lag sampler 2s] --> estimator[ArrivalRateEstimator]
+    estimator --> lambda["lambda = estimateLambda()"]
+    filterStats[filter_configs.avgLatencyMs] --> mu["mu = 1000/avgLatencyMs"]
+    lambda --> mmc["c_optimal = ceil(lambda / mu*rho)"]
+    mu --> mmc
+    lagSample --> lagCheck{lag > threshold?}
+    lagCheck -->|yes| kedaOverride["c_lag = ceil(lag/threshold) + current"]
+    kedaOverride --> maxC["c = max(c_optimal, c_lag)"]
+    lagCheck -->|no| maxC
+    mmc --> maxC
+    maxC --> decision{c vs current?}
+    decision -->|c > current| spawnAgent[spawn]
+    decision -->|c < current| drainAgent["drain (LIFO, cooldown)"]
+    decision -->|equal| noOp[no-op]
+```
+
+### Observability
+
+- `hatchery_events` table logs every spawn/drain/restart with lambda, mu, lag, pressure.
+- `GET /hatchery/snapshot` on the feed server (port 3002) returns live instance counts and estimator state.
+- Experiment scripts use `HATCHERY_{ROLE}_MIN` / `HATCHERY_{ROLE}_MAX` env vars to pin instance counts.
+
+### Usage
+
+```bash
+# Hatchery mode (single process)
+AGENT_ROLE=hatchery pnpm run swarm
+
+# Or with full preflight:
+./scripts/swarm-hatchery.sh
+
+# Legacy mode (unchanged)
+AGENT_ROLE=facts pnpm run swarm
+./scripts/swarm-all.sh
+```

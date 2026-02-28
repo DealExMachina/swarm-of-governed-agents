@@ -57,6 +57,8 @@ export interface EventBus {
     handler: (msg: EventBusMessage) => Promise<void>,
   ): Promise<PushSubscription>;
   ensureStream(stream: string, subjects: string[]): Promise<void>;
+  /** Return the number of pending (unacknowledged) messages for a durable consumer. */
+  getConsumerPending(stream: string, consumer: string): Promise<number>;
   close(): Promise<void>;
 }
 
@@ -324,6 +326,15 @@ export async function makeEventBus(natsUrl?: string): Promise<EventBus> {
           }
         },
       };
+    },
+
+    async getConsumerPending(stream, consumer) {
+      try {
+        const info = await jsm.consumers.info(stream, consumer);
+        return info.num_pending ?? 0;
+      } catch {
+        return 0;
+      }
     },
 
     async close() {

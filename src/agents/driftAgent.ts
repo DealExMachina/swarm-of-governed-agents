@@ -111,6 +111,7 @@ export async function runDriftAgent(
       }
       const driftRaw = await s3GetText(s3, bucket, KEY_DRIFT);
       const drift = driftRaw ? (JSON.parse(driftRaw) as { level: string; types: string[] }) : { level: "none", types: [] };
+      logger.info("drift written (LLM)", { drift_level: drift.level, types: drift.types });
       return { wrote: [KEY_DRIFT], level: drift.level, types: drift.types };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -152,6 +153,7 @@ export async function runDriftAgent(
   const ts = new Date().toISOString();
   await s3PutJson(s3, bucket, KEY_DRIFT, drift);
   await s3PutJson(s3, bucket, KEY_DRIFT_HIST(ts), drift);
+  logger.info("drift written (fallback)", { drift_level: drift.level, types: drift.types });
   return { wrote: [KEY_DRIFT, KEY_DRIFT_HIST(ts)], level: drift.level, types: drift.types };
 }
 

@@ -24,6 +24,7 @@ describe("semanticGraph", () => {
       .mockResolvedValueOnce({ rows: [{ resolved: 3, total: 4 }] })
       .mockResolvedValueOnce({ rows: [{ risk_score: 0.1 }] })
       .mockResolvedValueOnce({ rows: [{ total: 2 }] })
+      .mockResolvedValueOnce({ rows: [{ total: 1 }] })
       .mockResolvedValueOnce({ rows: [{ c: 1 }] });
   });
 
@@ -55,12 +56,15 @@ describe("semanticGraph", () => {
 
   it("appendResolutionGoal inserts a goal node with status resolved", async () => {
     mockQuery.mockReset();
+    // 1st query: active goals (none found)
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    // 2nd query: INSERT INTO nodes (appendNode)
     mockQuery.mockResolvedValueOnce({ rows: [{ node_id: "goal-res-1" }] });
     const { appendResolutionGoal } = await import("../../src/semanticGraph.js");
     const nodeId = await appendResolutionGoal("scope-1", "We decided to align hiring to 15+.", "Hiring target aligned");
     expect(nodeId).toBe("goal-res-1");
-    expect(mockQuery).toHaveBeenCalledTimes(1);
-    const call = mockQuery.mock.calls[0];
+    expect(mockQuery).toHaveBeenCalledTimes(2);
+    const call = mockQuery.mock.calls[1]; // INSERT is the 2nd call
     expect(call[0]).toContain("INSERT INTO nodes");
     expect(call[1]).toEqual([
       "scope-1",

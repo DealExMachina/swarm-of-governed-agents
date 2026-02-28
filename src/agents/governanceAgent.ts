@@ -687,23 +687,41 @@ async function runFinalityConsumerLoop(bus: EventBus, signal?: AbortSignal): Pro
   logger.info("finality consumer stopped (shutdown signal)");
 }
 
-export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket: string, signal?: AbortSignal): Promise<void> {
+export interface GovernanceLoopOpts {
+  signal?: AbortSignal;
+  consumerName?: string;
+  agentId?: string;
+  onHeartbeat?: (processed: number) => void;
+  /** When false, skip starting the MITL HTTP server (avoid port conflicts in multi-instance). */
+  startMitl?: boolean;
+}
+
+export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket: string, signalOrOpts?: AbortSignal | GovernanceLoopOpts): Promise<void> {
+  const opts: GovernanceLoopOpts = signalOrOpts instanceof AbortSignal
+    ? { signal: signalOrOpts }
+    : (signalOrOpts ?? {});
+  const signal = opts.signal;
+  const effectiveAgentId = opts.agentId ?? AGENT_ID;
+  const shouldStartMitl = opts.startMitl !== false;
+
   const { setMitlPublishFns, startMitlServer } = await import("../mitlServer.js");
   const { startWatchdog } = await import("../watchdog.js");
-  const mitlPort = parseInt(process.env.MITL_PORT ?? "3001", 10);
-  setMitlPublishFns(
-    (subj, data) => bus.publish(subj, data as Record<string, string>).then(() => {}),
-    (subj, data) => bus.publish(subj, data as Record<string, string>).then(() => {}),
-  );
-  startMitlServer(mitlPort);
+  if (shouldStartMitl) {
+    const mitlPort = parseInt(process.env.MITL_PORT ?? "3001", 10);
+    setMitlPublishFns(
+      (subj, data) => bus.publish(subj, data as Record<string, string>).then(() => {}),
+      (subj, data) => bus.publish(subj, data as Record<string, string>).then(() => {}),
+    );
+    startMitlServer(mitlPort);
+  }
 
   void runFinalityConsumerLoop(bus, signal);
 
   const { state: watchdogState } = startWatchdog(bus, signal);
 
   const subject = "swarm.proposals.>";
-  const consumer = `governance-${AGENT_ID}`;
-  logger.info("governance agent started", { subject, consumer });
+  const consumer = opts.consumerName ?? `governance-${effectiveAgentId}`;
+  logger.info("governance agent started", { subject, consumer, agentId: effectiveAgentId });
 
   const BACKOFF_MS = 500;
   const BACKOFF_MAX_MS = 5000;
@@ -750,6 +768,7 @@ export async function runGovernanceAgentLoop(bus: EventBus, s3: S3Client, bucket
       },
       { timeoutMs: 5000, maxMessages: 10 },
     );
+    opts.onHeartbeat?.(processed);
     if (processed === 0) {
       await new Promise((r) => setTimeout(r, delayMs));
       delayMs = Math.min(delayMs * 2, BACKOFF_MAX_MS);

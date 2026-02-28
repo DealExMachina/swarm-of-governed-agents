@@ -14,17 +14,16 @@
 #   - Feed running on port 3002
 # =============================================================================
 
-set -euo pipefail
+set -eo pipefail
 
 FEED_URL="${FEED_URL:-http://localhost:3002}"
 MITL_URL="${MITL_URL:-http://localhost:3001}"
 FAST="${FAST:-false}"
 START_STEP="${START_STEP:-1}"
 # When SWARM_API_TOKEN is set, add Bearer header to curl calls to feed/MITL
+CURL_AUTH=()
 if [ -n "${SWARM_API_TOKEN:-}" ]; then
   CURL_AUTH=(-H "Authorization: Bearer $SWARM_API_TOKEN")
-else
-  CURL_AUTH=()
 fi
 
 # Parse flags
